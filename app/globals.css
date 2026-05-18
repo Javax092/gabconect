@@ -26,3 +26,34 @@ body {
 ::selection {
   background: rgba(15, 23, 32, 0.12);
 }
+
+.ops-grid::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: linear-gradient(180deg, rgba(255, 255, 255, 0.45), transparent 100%);
+  pointer-events: none;
+}
+
+.signal-dot {
+  box-shadow: 0 0 0 rgba(34, 211, 238, 0.3);
+  animation: signal-pulse 2.4s ease-out infinite;
+}
+
+@keyframes signal-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.28);
+  }
+
+  70% {
+    box-shadow: 0 0 0 9px rgba(34, 211, 238, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0);
+  }
+}

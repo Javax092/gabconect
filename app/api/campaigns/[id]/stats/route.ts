@@ -2,7 +2,7 @@ import { CampaignRecipientStatus } from "@prisma/client";
 
 import { ApiRouteError, apiError, apiSuccess, parseRouteId } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
-import { countEligibleContacts } from "@/lib/whatsapp-campaigns";
+import { countAudienceContacts, syncCampaignOperationState } from "@/lib/campaign-infrastructure";
 import { prisma } from "@/lib/prisma";
 
 type RouteContext = {
@@ -33,6 +33,14 @@ export async function GET(_request: Request, context: RouteContext) {
             metaTemplateName: true,
             status: true
           }
+        },
+        audienceConfig: true,
+        operationState: true,
+        safetySimulations: {
+          orderBy: {
+            createdAt: "desc"
+          },
+          take: 1
         }
       }
     });
@@ -41,7 +49,9 @@ export async function GET(_request: Request, context: RouteContext) {
       throw new ApiRouteError(404, "Campanha não encontrada.", "NOT_FOUND");
     }
 
-    const [statsRows, eligibleContacts, unsubscribeCount] = await Promise.all([
+    await syncCampaignOperationState(campaignId);
+
+    const [statsRows, eligibleContacts, unsubscribeCount, operationState] = await Promise.all([
       prisma.campaignRecipient.groupBy({
         by: ["status"],
         where: {
@@ -51,11 +61,23 @@ export async function GET(_request: Request, context: RouteContext) {
           _all: true
         }
       }),
-      countEligibleContacts(mandateId, campaign.segmentTags),
+      countAudienceContacts(mandateId, {
+        tags: campaign.audienceConfig?.tags ?? campaign.segmentTags,
+        groups: campaign.audienceConfig?.groups ?? [],
+        priorities: campaign.audienceConfig?.priorities ?? [],
+        locations: campaign.audienceConfig?.locations ?? [],
+        interests: campaign.audienceConfig?.interests ?? [],
+        contactTypes: campaign.audienceConfig?.contactTypes ?? []
+      }),
       prisma.campaignRecipient.count({
         where: {
           campaignId,
           status: CampaignRecipientStatus.UNSUBSCRIBED
+        }
+      }),
+      prisma.campaignOperationState.findUnique({
+        where: {
+          campaignId
         }
       })
     ]);
@@ -82,7 +104,10 @@ export async function GET(_request: Request, context: RouteContext) {
     return apiSuccess({
       campaign,
       stats,
-      eligibleContacts
+      eligibleContacts,
+      operationState
+      ,
+      latestSafetySimulation: campaign.safetySimulations[0] ?? null
     });
   } catch (error) {
     return apiError(error);

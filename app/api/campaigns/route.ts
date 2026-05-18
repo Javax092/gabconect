@@ -2,8 +2,8 @@ import { CampaignRecipientStatus, CampaignStatus, WhatsAppTemplateStatus } from 
 
 import { ApiRouteError, apiError, apiSuccess, readJson, validateSchema } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
+import { countAudienceContacts, flattenAudience, syncCampaignOperationState } from "@/lib/campaign-infrastructure";
 import { getCampaignSettings } from "@/lib/campaign-settings";
-import { countEligibleContacts } from "@/lib/whatsapp-campaigns";
 import { prisma } from "@/lib/prisma";
 import { campaignFiltersSchema, campaignSchema } from "@/lib/validations/campaign";
 
@@ -51,12 +51,24 @@ export async function GET(request: Request) {
     const filters = validateSchema(campaignFiltersSchema, {
       status: url.searchParams.get("status") ?? undefined,
       eligibleCount: url.searchParams.get("eligibleCount") ?? undefined,
-      tags: url.searchParams.getAll("tags")
+      tags: url.searchParams.getAll("tags"),
+      groups: url.searchParams.getAll("groups"),
+      priorities: url.searchParams.getAll("priorities"),
+      locations: url.searchParams.getAll("locations"),
+      interests: url.searchParams.getAll("interests"),
+      contactTypes: url.searchParams.getAll("contactTypes")
     });
-    const tags = normalizeTags(filters.tags ?? []);
+    const audience = {
+      tags: normalizeTags(filters.tags ?? []),
+      groups: normalizeTags(filters.groups ?? []),
+      priorities: normalizeTags(filters.priorities ?? []),
+      locations: normalizeTags(filters.locations ?? []),
+      interests: normalizeTags(filters.interests ?? []),
+      contactTypes: normalizeTags(filters.contactTypes ?? [])
+    };
 
     if (filters.eligibleCount) {
-      const eligibleCount = await countEligibleContacts(mandateId, tags);
+      const eligibleCount = await countAudienceContacts(mandateId, audience);
       return apiSuccess({ eligibleCount });
     }
 
@@ -75,6 +87,14 @@ export async function GET(request: Request) {
             metaTemplateName: true,
             status: true
           }
+        },
+        audienceConfig: true,
+        operationState: true,
+        safetySimulations: {
+          orderBy: {
+            createdAt: "desc"
+          },
+          take: 1
         }
       },
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }]
@@ -100,6 +120,10 @@ export async function GET(request: Request) {
     return apiSuccess({
       campaigns: campaigns.map((campaign) => ({
         ...campaign,
+        audience:
+          campaign.audienceConfig
+            ? flattenAudience(campaign.audienceConfig)
+            : campaign.segmentTags,
         stats:
           statsMap.get(campaign.id) ??
           {
@@ -109,7 +133,10 @@ export async function GET(request: Request) {
             SKIPPED: 0,
             UNSUBSCRIBED: 0,
             total: 0
-          }
+          },
+        operationState: campaign.operationState
+        ,
+        safetySimulation: campaign.safetySimulations[0] ?? null
       }))
     });
   } catch (error) {
@@ -123,7 +150,15 @@ export async function POST(request: Request) {
     const { mandateId } = getMandateContext(user);
     const body = await readJson(request);
     const parsed = validateSchema(campaignSchema, body);
-    const segmentTags = normalizeTags(parsed.segmentTags ?? []);
+    const audienceConfig = {
+      tags: normalizeTags(parsed.segmentTags ?? []),
+      groups: normalizeTags(parsed.groups ?? []),
+      priorities: normalizeTags(parsed.priorities ?? []),
+      locations: normalizeTags(parsed.locations ?? []),
+      interests: normalizeTags(parsed.interests ?? []),
+      contactTypes: normalizeTags(parsed.contactTypes ?? [])
+    };
+    const segmentTags = audienceConfig.tags;
     const settings = await getCampaignSettings(mandateId);
 
     const template = await prisma.whatsAppTemplate.findFirst({
@@ -152,7 +187,10 @@ export async function POST(request: Request) {
         dailyLimit: parsed.dailyLimit ?? settings.defaultDailyLimit,
         delaySeconds: parsed.delaySeconds ?? settings.defaultDelaySeconds,
         scheduledAt,
-        status: scheduledAt && scheduledAt > new Date() ? CampaignStatus.SCHEDULED : CampaignStatus.DRAFT
+        status: scheduledAt && scheduledAt > new Date() ? CampaignStatus.SCHEDULED : CampaignStatus.DRAFT,
+        audienceConfig: {
+          create: audienceConfig
+        }
       },
       include: {
         template: {
@@ -164,9 +202,12 @@ export async function POST(request: Request) {
             metaTemplateName: true,
             status: true
           }
-        }
+        },
+        audienceConfig: true,
+        operationState: true
       }
     });
+    await syncCampaignOperationState(campaign.id);
 
     return apiSuccess(
       {

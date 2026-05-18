@@ -1,9 +1,11 @@
 import Link from "next/link";
-import { AIActionType, ConversationStatus } from "@prisma/client";
-import { Clock3, MessageSquareText, ShieldAlert, Waypoints } from "lucide-react";
+import { AIActionType } from "@prisma/client";
+import { Clock3, MessageSquareText, Radar, ShieldAlert, Waypoints } from "lucide-react";
 
+import { buttonVariants } from "@/components/ui/button";
 import { DemoDashboardPage } from "@/components/demo/demo-pages";
 import { requireUser } from "@/lib/auth";
+import { bootstrapCampaignEvents, ensureCampaignInfrastructure, getInfrastructureSnapshot } from "@/lib/campaign-infrastructure";
 import { isDemoMode } from "@/lib/demo";
 import { prisma } from "@/lib/prisma";
 import { getQueueHealth } from "@/lib/queue";
@@ -41,7 +43,7 @@ export default async function AdminPage() {
     mandateId: user.mandateId
   });
 
-  const [conversations, activeTakeovers, approvedTemplates, latestCompliance, queueHealth, queueCount, aiActions] = await Promise.all([
+  const [conversations, approvedTemplates, latestCompliance, queueHealth, aiActions] = await Promise.all([
     prisma.conversation.findMany({
       where: { mandateId: user.mandateId },
       include: {
@@ -53,12 +55,6 @@ export default async function AdminPage() {
       },
       orderBy: [{ humanPriority: "desc" }, { lastMessageAt: "desc" }],
       take: 8
-    }),
-    prisma.humanTakeover.count({
-      where: {
-        mandateId: user.mandateId,
-        active: true
-      }
     }),
     prisma.messageTemplate.count({
       where: {
@@ -72,12 +68,6 @@ export default async function AdminPage() {
       take: 4
     }),
     getQueueHealth(),
-    prisma.messageQueue.count({
-      where: {
-        mandateId: user.mandateId,
-        status: "PENDING"
-      }
-    }),
     prisma.aIAction.findMany({
       where: {
         mandateId: user.mandateId
@@ -88,14 +78,9 @@ export default async function AdminPage() {
       take: 4
     })
   ]);
-
-  const humanQueue = conversations.filter((item) => item.status === ConversationStatus.HUMAN).length;
-  const openConversations = conversations.filter((item) => item.status === ConversationStatus.OPEN).length;
-  const pausedConversations = conversations.filter((item) => item.aiPaused).length;
-  const avgRisk =
-    conversations.length > 0
-      ? Math.round(conversations.reduce((total, item) => total + item.riskScore, 0) / conversations.length)
-      : 0;
+  await ensureCampaignInfrastructure(user.mandateId, user.mandate.whatsappNumber);
+  await bootstrapCampaignEvents(user.mandateId);
+  const ops = await getInfrastructureSnapshot(user.mandateId, user.mandate.whatsappNumber);
 
   return (
     <div className="space-y-6">
@@ -103,27 +88,40 @@ export default async function AdminPage() {
         <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-300/80">
-              Infraestrutura segura de atendimento inteligente para WhatsApp
+              Infrastructure command center
             </p>
-            <h1 className="mt-3 text-3xl font-semibold text-white">Conversas primeiro. Risco sob controle.</h1>
+            <h1 className="mt-3 text-3xl font-semibold text-white">
+              Escale campanhas no WhatsApp sem destruir a reputação do seu número.
+            </h1>
             <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300">
-              WhatsApp é a interface. A inteligência acontece no backend. A IA apoia a triagem e
-              o roteamento, enquanto a equipe mantém o controle das decisões sensíveis.
+              O Gabinete Conectado distribui mensagens de forma inteligente, humanizada e segura,
+              reduzindo riscos de bloqueio e aumentando a taxa de entrega.
             </p>
+            <div className="mt-5 flex flex-wrap gap-3">
+              <Link href="/admin/campaigns" className={buttonVariants("primary")}>
+                Iniciar operação
+              </Link>
+              <Link href="/admin/campaigns" className={buttonVariants("secondary")}>
+                Criar campanha segura
+              </Link>
+              <Link href="/admin/campaigns/operations" className={buttonVariants("secondary")}>
+                Monitorar reputação
+              </Link>
+            </div>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <HeroPill label="Fila humana" value={String(humanQueue)} />
-            <HeroPill label="Takeovers ativos" value={String(activeTakeovers)} />
+            <HeroPill label="Reputation score" value={String(ops.metrics.reputationScore)} />
+            <HeroPill label="Safe throughput" value={String(ops.metrics.safeThroughput)} />
           </div>
         </div>
       </section>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Mensagens na fila" value={String(queueCount)} icon={<MessageSquareText className="h-5 w-5" />} />
-        <MetricCard label="Conversas abertas" value={String(openConversations)} icon={<MessageSquareText className="h-5 w-5" />} />
-        <MetricCard label="IA pausada" value={String(pausedConversations)} icon={<ShieldAlert className="h-5 w-5" />} />
-        <MetricCard label="Risco médio" value={String(avgRisk)} icon={<Waypoints className="h-5 w-5" />} />
+        <MetricCard label="Delivery rate" value={`${ops.metrics.deliveryRate}%`} icon={<MessageSquareText className="h-5 w-5" />} />
+        <MetricCard label="Spam probability" value={`${ops.metrics.spamProbability}%`} icon={<ShieldAlert className="h-5 w-5" />} />
+        <MetricCard label="Queue pressure" value={`${ops.metrics.queuePressure}%`} icon={<Waypoints className="h-5 w-5" />} />
+        <MetricCard label="Campaign health" value={`${ops.metrics.campaignHealth}%`} icon={<Radar className="h-5 w-5" />} />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_360px]">
@@ -193,6 +191,8 @@ export default async function AdminPage() {
               <p>Status Redis: {queueHealth.redis}</p>
               <p>Status Queue: {queueHealth.queues}</p>
               <p>Templates aprovados: {approvedTemplates}</p>
+              <p>Warmup atual: {ops.profile.stageLabel}</p>
+              <p>Delay humanizado: {ops.metrics.humanizedDelay}</p>
               <p className="text-slate-400">{queueHealth.reason}</p>
             </div>
           </div>
@@ -215,8 +215,8 @@ export default async function AdminPage() {
           <div className="rounded-[28px] border border-emerald-400/20 bg-emerald-400/10 p-5">
             <p className="text-sm font-semibold text-emerald-100">Arquitetura operacional</p>
             <p className="mt-3 text-sm leading-7 text-emerald-50/90">
-              WhatsApp Cloud API → Webhook → Queue Layer → Compliance Layer → Intent Detection →
-              AI Decision Engine → Humanizer Layer → Human Escalation → WhatsApp Sender
+              WhatsApp Cloud API → Webhook → Queue Layer → Compliance Layer → Reputation Engine →
+              Warmup Layer → Humanization Layer → Failsafe System → WhatsApp Sender
             </p>
           </div>
         </div>

@@ -8,6 +8,11 @@ export const campaignSchema = z.object({
   name: z.string().trim().min(3, "Informe um nome para a campanha."),
   templateId: z.string().cuid("Selecione um template válido."),
   segmentTags: z.array(z.string().trim().min(1)).max(20).default([]),
+  groups: z.array(z.string().trim().min(1)).max(20).default([]),
+  priorities: z.array(z.string().trim().min(1)).max(20).default([]),
+  locations: z.array(z.string().trim().min(1)).max(20).default([]),
+  interests: z.array(z.string().trim().min(1)).max(20).default([]),
+  contactTypes: z.array(z.string().trim().min(1)).max(20).default([]),
   dailyLimit: z.coerce
     .number()
     .int()
@@ -42,5 +47,10 @@ export const campaignSchema = z.object({
 export const campaignFiltersSchema = z.object({
   status: z.enum(campaignStatuses).optional(),
   eligibleCount: z.coerce.boolean().optional().default(false),
-  tags: z.array(z.string().trim().min(1)).optional().default([])
+  tags: z.array(z.string().trim().min(1)).optional().default([]),
+  groups: z.array(z.string().trim().min(1)).optional().default([]),
+  priorities: z.array(z.string().trim().min(1)).optional().default([]),
+  locations: z.array(z.string().trim().min(1)).optional().default([]),
+  interests: z.array(z.string().trim().min(1)).optional().default([]),
+  contactTypes: z.array(z.string().trim().min(1)).optional().default([])
 });

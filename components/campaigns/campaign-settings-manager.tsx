@@ -194,12 +194,12 @@ export function CampaignSettingsManager({
             <div className="grid gap-4 md:grid-cols-3">
               <Field
                 label="Limite diário"
-                hint="Entre 1 e 50 envios por dia."
+                hint="Entre 1 e 200 envios por dia."
                 input={
                   <Input
                     type="number"
                     min={1}
-                    max={50}
+                    max={200}
                     value={settings.defaultDailyLimit}
                     onChange={(event) =>
                       setSettings((current) => ({
@@ -213,11 +213,11 @@ export function CampaignSettingsManager({
               />
               <Field
                 label="Delay entre envios"
-                hint="Entre 30 e 3600 segundos."
+                hint="Entre 25 e 3600 segundos."
                 input={
                   <Input
                     type="number"
-                    min={30}
+                    min={25}
                     max={3600}
                     value={settings.defaultDelaySeconds}
                     onChange={(event) =>

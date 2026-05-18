@@ -3,10 +3,10 @@ import { prisma } from "@/lib/prisma";
 export const CAMPAIGN_LIMITS = {
   dailyLimit: {
     min: 1,
-    max: 50
+    max: 200
   },
   delaySeconds: {
-    min: 30,
+    min: 25,
     max: 3600
   },
   maxConsecutiveFailures: {
@@ -17,7 +17,7 @@ export const CAMPAIGN_LIMITS = {
 
 export const DEFAULT_CAMPAIGN_SETTINGS = {
   defaultDailyLimit: 20,
-  defaultDelaySeconds: 60,
+  defaultDelaySeconds: 45,
   maxConsecutiveFailures: 3
 } as const;
 

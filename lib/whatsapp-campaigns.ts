@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { flattenAudience } from "@/lib/campaign-infrastructure";
 import { DEFAULT_CAMPAIGN_SETTINGS, getCampaignSettings } from "@/lib/campaign-settings";
 
 const WHATSAPP_GRAPH_VERSION = "v23.0";
@@ -50,14 +51,16 @@ export function extractOptOutKeyword(text: string) {
 }
 
 export function getEligibleContactWhere(mandateId: string, tags: string[]): Prisma.ContactWhereInput {
+  const normalizedTags = [...new Set(tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+
   return {
     mandateId,
     optIn: true,
     status: ContactStatus.ACTIVE,
-    ...(tags.length > 0
+    ...(normalizedTags.length > 0
       ? {
           tags: {
-            hasEvery: tags
+            hasEvery: normalizedTags
           }
         }
       : {})
@@ -96,9 +99,17 @@ export async function syncCampaignCounters(campaignId: string) {
 }
 
 export async function createCampaignRecipients(campaignId: string, mandateId: string, tags: string[]) {
+  const audience = await prisma.campaignAudienceConfig.findUnique({
+    where: {
+      campaignId
+    }
+  });
+  const audienceTags = audience
+    ? flattenAudience(audience).map((term) => term.toLowerCase())
+    : tags;
   const [contacts, existingRecipients] = await Promise.all([
     prisma.contact.findMany({
-      where: getEligibleContactWhere(mandateId, tags),
+      where: getEligibleContactWhere(mandateId, audienceTags),
       select: {
         id: true
       }

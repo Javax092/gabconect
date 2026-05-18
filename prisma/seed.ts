@@ -175,6 +175,190 @@ async function seedCampaignData(mandateId: string) {
       }
     });
   }
+
+  const profile = await prisma.numberReputationProfile.upsert({
+    where: {
+      mandateId
+    },
+    update: {
+      phoneNumber: "+15550009999",
+      reputationScore: 74,
+      spamRisk: 24,
+      deliveryHealth: 89,
+      qualityRating: "Estavel",
+      trustLevel: "Supervisionado",
+      safeThroughput: 26,
+      activeThroughput: 18
+    },
+    create: {
+      mandateId,
+      phoneNumber: "+15550009999",
+      reputationScore: 74,
+      spamRisk: 24,
+      deliveryHealth: 89,
+      qualityRating: "Estavel",
+      trustLevel: "Supervisionado",
+      safeThroughput: 26,
+      activeThroughput: 18
+    }
+  });
+
+  const approvedTemplates = await prisma.whatsAppTemplate.findMany({
+    where: {
+      mandateId
+    },
+    orderBy: {
+      createdAt: "asc"
+    }
+  });
+
+  if (approvedTemplates.length === 0) {
+    return;
+  }
+
+  const existingCampaigns = await prisma.campaign.count({
+    where: {
+      mandateId
+    }
+  });
+
+  if (existingCampaigns > 0) {
+    return;
+  }
+
+  const [safeTemplate, mediumTemplate, utilityTemplate] = approvedTemplates;
+  const safeCampaign = await prisma.campaign.create({
+    data: {
+      mandateId,
+      name: "Campanha segura de relacionamento",
+      templateId: safeTemplate.id,
+      segmentTags: ["bairro"],
+      status: "DRAFT",
+      dailyLimit: 120,
+      delaySeconds: 45,
+      audienceConfig: {
+        create: {
+          tags: ["bairro"],
+          groups: [],
+          priorities: [],
+          locations: [],
+          interests: [],
+          contactTypes: []
+        }
+      }
+    }
+  });
+  const mediumCampaign = await prisma.campaign.create({
+    data: {
+      mandateId,
+      name: "Campanha com risco medio",
+      templateId: (mediumTemplate ?? safeTemplate).id,
+      segmentTags: ["evento", "academia"],
+      status: "PAUSED",
+      dailyLimit: 140,
+      delaySeconds: 60,
+      audienceConfig: {
+        create: {
+          tags: ["evento"],
+          groups: [],
+          priorities: [],
+          locations: [],
+          interests: ["academia"],
+          contactTypes: []
+        }
+      }
+    }
+  });
+  const criticalCampaign = await prisma.campaign.create({
+    data: {
+      mandateId,
+      name: "Campanha bloqueada por risco critico",
+      templateId: (utilityTemplate ?? safeTemplate).id,
+      segmentTags: ["teste"],
+      status: "PAUSED",
+      dailyLimit: 220,
+      delaySeconds: 30,
+      audienceConfig: {
+        create: {
+          tags: ["teste"],
+          groups: [],
+          priorities: [],
+          locations: [],
+          interests: [],
+          contactTypes: []
+        }
+      }
+    }
+  });
+
+  await prisma.campaignSafetySimulation.createMany({
+    data: [
+      {
+        campaignId: safeCampaign.id,
+        riskLevel: "LOW",
+        safetyScore: 86,
+        recommendedDailyLimit: 110,
+        recommendedBatchSize: 24,
+        recommendedDelayMinSeconds: 25,
+        recommendedDelayMaxSeconds: 60,
+        requiresHumanReview: false,
+        canStartNow: true,
+        estimatedCompletionTime: "Hoje, em cerca de 2h",
+        estimatedReputationImpact: "Impacto controlado dentro da faixa segura",
+        warnings: ["Warmup respeitado e publico com opt-in consistente."],
+        recommendations: ["Manter o plano seguro recomendado."],
+        blockingReasons: []
+      },
+      {
+        campaignId: mediumCampaign.id,
+        riskLevel: "MEDIUM",
+        safetyScore: 67,
+        recommendedDailyLimit: 80,
+        recommendedBatchSize: 18,
+        recommendedDelayMinSeconds: 45,
+        recommendedDelayMaxSeconds: 110,
+        requiresHumanReview: false,
+        canStartNow: true,
+        estimatedCompletionTime: "2 dias operacionais estimados",
+        estimatedReputationImpact: "Leve pressao reputacional esperada",
+        warnings: ["Volume acima da media recente do numero."],
+        recommendations: ["Distribuir em 4 lotes com pausa entre janelas."],
+        blockingReasons: []
+      },
+      {
+        campaignId: criticalCampaign.id,
+        riskLevel: "CRITICAL",
+        safetyScore: 34,
+        recommendedDailyLimit: 30,
+        recommendedBatchSize: 8,
+        recommendedDelayMinSeconds: 180,
+        recommendedDelayMaxSeconds: 320,
+        requiresHumanReview: true,
+        canStartNow: false,
+        estimatedCompletionTime: "6 dias operacionais estimados",
+        estimatedReputationImpact: "Queda material de reputacao se o plano for ignorado",
+        warnings: ["Falhas recentes acima da faixa segura."],
+        recommendations: ["Reduzir audiencia e revisar template antes de retomar."],
+        blockingReasons: ["Numero em modo de recuperacao de confianca."]
+      }
+    ]
+  });
+
+  await prisma.trustRecoveryState.create({
+    data: {
+      profileId: profile.id,
+      mandateId,
+      status: "ACTIVE",
+      reason: "Seed demo com numero em trust recovery para apresentacao comercial.",
+      recommendedLimit: 40,
+      cooldownUntil: new Date("2026-05-19T15:00:00.000Z"),
+      recoverySteps: [
+        "Usar campanhas menores com opt-in recente.",
+        "Aumentar delays e pausas entre lotes.",
+        "Priorizar templates com melhor saude."
+      ]
+    }
+  });
 }
 
 async function seedSampleData(mandateId: string) {

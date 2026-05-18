@@ -111,6 +111,54 @@ enum CampaignRecipientStatus {
   UNSUBSCRIBED
 }
 
+enum CampaignWarmupStage {
+  DORMANT
+  DAY_1
+  DAY_2
+  DAY_3
+  STABLE
+  COOLDOWN
+  PAUSED
+}
+
+enum CampaignPipelineStage {
+  QUEUED
+  WARMING
+  SENDING
+  THROTTLED
+  PAUSED
+  RISK_DETECTED
+  HUMAN_REVIEW
+  COMPLETED
+}
+
+enum CampaignRiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum CampaignRiskTrend {
+  IMPROVING
+  STABLE
+  WORSENING
+}
+
+enum TrustRecoveryStatus {
+  INACTIVE
+  ACTIVE
+  MONITORING
+  RECOVERED
+}
+
+enum OperationEventLevel {
+  INFO
+  WARN
+  CRITICAL
+  STABLE
+}
+
 enum WhatsAppMessageLogDirection {
   INBOUND
   OUTBOUND
@@ -162,6 +210,10 @@ model Mandate {
   whatsappTemplates WhatsAppTemplate[]
   campaigns      Campaign[]
   campaignSettings CampaignSettings?
+  reputationProfile NumberReputationProfile?
+  warmupRules    WarmupRule[]
+  campaignEventLogs CampaignEventLog[]
+  trustRecoveryStates TrustRecoveryState[]
   optOutEvents   OptOutEvent[]
   whatsappMessageLogs WhatsAppMessageLog[]
   createdAt      DateTime       @default(now())
@@ -433,10 +485,186 @@ model Campaign {
   mandate       Mandate        @relation(fields: [mandateId], references: [id], onDelete: Cascade)
   template      WhatsAppTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
   recipients    CampaignRecipient[]
+  audienceConfig CampaignAudienceConfig?
+  operationState CampaignOperationState?
+  safetySimulations CampaignSafetySimulation[]
+  reputationAdjustments ReputationAdjustmentLog[]
+  eventLogs     CampaignEventLog[]
   messageLogs   WhatsAppMessageLog[]
 
   @@index([mandateId, status, createdAt])
   @@index([templateId])
+}
+
+model NumberReputationProfile {
+  id                String              @id @default(cuid())
+  mandateId         String              @unique
+  phoneNumber       String
+  reputationScore   Int                 @default(78)
+  spamRisk          Int                 @default(18)
+  deliveryHealth    Int                 @default(88)
+  qualityRating     String              @default("Estavel")
+  trustLevel        String              @default("Protegido")
+  warmingStage      CampaignWarmupStage @default(DAY_1)
+  trendDelta        Int                 @default(4)
+  activeThroughput  Int                 @default(18)
+  safeThroughput    Int                 @default(28)
+  humanizedDelayMin Int                 @default(25)
+  humanizedDelayMax Int                 @default(90)
+  blockRisk         Int                 @default(14)
+  queuePressure     Int                 @default(32)
+  lastEvaluatedAt   DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  mandate           Mandate             @relation(fields: [mandateId], references: [id], onDelete: Cascade)
+  adjustmentLogs    ReputationAdjustmentLog[]
+  trustRecoveryStates TrustRecoveryState[]
+
+  @@index([mandateId, updatedAt])
+}
+
+model WarmupRule {
+  id               String              @id @default(cuid())
+  mandateId        String
+  dayNumber        Int
+  label            String
+  stage            CampaignWarmupStage
+  dailyLimit       Int
+  throughputCap    Int
+  minDelaySeconds  Int
+  maxDelaySeconds  Int
+  pauseOnRisk      Int                 @default(70)
+  active           Boolean             @default(true)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  mandate          Mandate             @relation(fields: [mandateId], references: [id], onDelete: Cascade)
+
+  @@unique([mandateId, dayNumber])
+  @@index([mandateId, stage])
+}
+
+model CampaignAudienceConfig {
+  id           String   @id @default(cuid())
+  campaignId   String   @unique
+  tags         String[]
+  groups       String[]
+  priorities   String[]
+  locations    String[]
+  interests    String[]
+  contactTypes String[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  campaign     Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+}
+
+model CampaignOperationState {
+  id                 String               @id @default(cuid())
+  campaignId         String               @unique
+  pipelineStage      CampaignPipelineStage @default(QUEUED)
+  riskScore          Int                  @default(18)
+  spamProbability    Int                  @default(12)
+  deliveryRate       Int                  @default(93)
+  queuePressure      Int                  @default(28)
+  activeThroughput   Int                  @default(16)
+  safeThroughput     Int                  @default(24)
+  currentDelayMin    Int                  @default(25)
+  currentDelayMax    Int                  @default(90)
+  sendingWindowStart Int                  @default(8)
+  sendingWindowEnd   Int                  @default(20)
+  cooldownMinutes    Int                  @default(12)
+  failsafeTriggered  Boolean              @default(false)
+  humanReviewNeeded  Boolean              @default(false)
+  recommendedAction  String?
+  pausedReason       String?
+  lastEvaluatedAt    DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  campaign           Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([pipelineStage, updatedAt])
+}
+
+model CampaignEventLog {
+  id                String              @id @default(cuid())
+  mandateId         String
+  campaignId        String?
+  campaignRecipientId String?
+  level             OperationEventLevel @default(INFO)
+  eventType         String
+  title             String
+  message           String
+  recommendedAction String?
+  metadata          Json?
+  createdAt         DateTime            @default(now())
+  mandate           Mandate             @relation(fields: [mandateId], references: [id], onDelete: Cascade)
+  campaign          Campaign?           @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  campaignRecipient CampaignRecipient?  @relation(fields: [campaignRecipientId], references: [id], onDelete: SetNull)
+
+  @@index([mandateId, createdAt])
+  @@index([campaignId, createdAt])
+  @@index([campaignRecipientId, createdAt])
+}
+
+model CampaignSafetySimulation {
+  id                          String            @id @default(cuid())
+  campaignId                  String
+  riskLevel                   CampaignRiskLevel
+  safetyScore                 Int
+  recommendedDailyLimit       Int
+  recommendedBatchSize        Int
+  recommendedDelayMinSeconds  Int
+  recommendedDelayMaxSeconds  Int
+  recommendedStartTime        DateTime?
+  requiresHumanReview         Boolean           @default(false)
+  canStartNow                 Boolean           @default(false)
+  estimatedCompletionTime     String?
+  estimatedReputationImpact   String?
+  warnings                    Json?
+  recommendations             Json?
+  blockingReasons             Json?
+  createdAt                   DateTime          @default(now())
+  campaign                    Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, createdAt])
+  @@index([riskLevel, createdAt])
+}
+
+model ReputationAdjustmentLog {
+  id         String                  @id @default(cuid())
+  profileId  String
+  campaignId String?
+  delta      Int
+  reason     String
+  severity   OperationEventLevel     @default(INFO)
+  metadata   Json?
+  createdAt  DateTime                @default(now())
+  profile    NumberReputationProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  campaign   Campaign?               @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@index([profileId, createdAt])
+  @@index([campaignId, createdAt])
+}
+
+model TrustRecoveryState {
+  id               String                  @id @default(cuid())
+  profileId        String
+  mandateId        String
+  status           TrustRecoveryStatus     @default(ACTIVE)
+  startedAt        DateTime                @default(now())
+  endedAt          DateTime?
+  reason           String
+  recommendedLimit Int
+  cooldownUntil    DateTime?
+  recoverySteps    Json?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  profile          NumberReputationProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  mandate          Mandate                 @relation(fields: [mandateId], references: [id], onDelete: Cascade)
+
+  @@index([profileId, updatedAt])
+  @@index([mandateId, status, updatedAt])
 }
 
 model CampaignSettings {
@@ -463,6 +691,7 @@ model CampaignRecipient {
   updatedAt    DateTime                @updatedAt
   campaign     Campaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   contact      Contact                 @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  eventLogs    CampaignEventLog[]
   messageLogs  WhatsAppMessageLog[]
 
   @@unique([campaignId, contactId])
