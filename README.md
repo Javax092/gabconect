@@ -500,3 +500,4 @@ O projeto já possui:
 - atendimento assistido por IA
 - templates oficiais
 - módulo de campanhas com configuração inicial no admin
+DEPLOY_MARKER_qua 20 mai 2026 03:31:45 -04
