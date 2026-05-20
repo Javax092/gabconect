@@ -1,10 +1,10 @@
 import type { ComponentType } from "react";
-import { ConversationStatus, DemandStatus } from "@prisma/client";
 import { Bot, CircleDot, ShieldAlert, CheckCircle2, XCircle } from "lucide-react";
 
+import type { ConversationStatusValue, DemandStatusValue } from "@/lib/prisma-enums";
 import { cn } from "@/lib/utils";
 
-type StatusValue = DemandStatus | ConversationStatus;
+type StatusValue = DemandStatusValue | ConversationStatusValue;
 
 const labelMap: Record<StatusValue, string> = {
   NEW: "Nova",

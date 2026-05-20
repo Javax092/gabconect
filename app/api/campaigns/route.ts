@@ -156,7 +156,8 @@ export async function POST(request: Request) {
       priorities: normalizeTags(parsed.priorities ?? []),
       locations: normalizeTags(parsed.locations ?? []),
       interests: normalizeTags(parsed.interests ?? []),
-      contactTypes: normalizeTags(parsed.contactTypes ?? [])
+      contactTypes: normalizeTags(parsed.contactTypes ?? []),
+      selectedContactIds: [...new Set(parsed.selectedContactIds)]
     };
     const segmentTags = audienceConfig.tags;
     const settings = await getCampaignSettings(mandateId);
@@ -177,6 +178,14 @@ export async function POST(request: Request) {
       );
     }
 
+    if (audienceConfig.selectedContactIds.length === 0) {
+      throw new ApiRouteError(
+        400,
+        "Selecione pelo menos um destinatário antes de criar a campanha.",
+        "NO_SELECTED_RECIPIENTS"
+      );
+    }
+
     const scheduledAt = parsed.scheduledAt ? new Date(parsed.scheduledAt) : null;
     const campaign = await prisma.campaign.create({
       data: {
@@ -188,8 +197,17 @@ export async function POST(request: Request) {
         delaySeconds: parsed.delaySeconds ?? settings.defaultDelaySeconds,
         scheduledAt,
         status: scheduledAt && scheduledAt > new Date() ? CampaignStatus.SCHEDULED : CampaignStatus.DRAFT,
-        audienceConfig: {
-          create: audienceConfig
+      audienceConfig: {
+          create: {
+            birthdayMonthDay: null,
+            tags: audienceConfig.tags,
+            groups: audienceConfig.groups,
+            priorities: audienceConfig.priorities,
+            locations: audienceConfig.locations,
+            interests: audienceConfig.interests,
+            contactTypes: audienceConfig.contactTypes,
+            selectedContactIds: audienceConfig.selectedContactIds
+          }
         }
       },
       include: {

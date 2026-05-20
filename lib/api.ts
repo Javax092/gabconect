@@ -4,11 +4,13 @@ import { z } from "zod";
 export class ApiRouteError extends Error {
   status: number;
   code: string;
+  details?: unknown;
 
-  constructor(status: number, message: string, code = "REQUEST_ERROR") {
+  constructor(status: number, message: string, code = "REQUEST_ERROR", details?: unknown) {
     super(message);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -21,7 +23,8 @@ export function apiError(error: ApiRouteError | Error | unknown) {
         success: false,
         error: {
           code: error.code,
-          message: error.message
+          message: error.message,
+          ...(error.details === undefined ? {} : { details: error.details })
         }
       },
       { status: error.status }

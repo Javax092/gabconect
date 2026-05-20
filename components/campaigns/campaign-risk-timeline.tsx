@@ -19,10 +19,10 @@ export function CampaignRiskTimeline({
 
   return (
     <article className="rounded-[24px] border border-white/10 bg-slate-950/55 p-4">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-300">Timeline de risco</p>
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-300">Checklist operacional</p>
       <div className="mt-4 space-y-3">
         {items.length === 0 ? (
-          <p className="text-sm text-slate-400">Sem alertas ativos. O plano recomendado esta dentro da faixa segura.</p>
+          <p className="text-sm text-slate-400">Sem alertas ativos. O plano recomendado está dentro da faixa segura.</p>
         ) : (
           items.map((item, index) => (
             <div key={`${item.label}-${index}`} className="flex gap-3">

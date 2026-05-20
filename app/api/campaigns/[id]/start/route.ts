@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 import {
   CampaignPipelineStage,
   CampaignStatus,
@@ -5,11 +6,13 @@ import {
   WhatsAppTemplateStatus
 } from "@prisma/client";
 
-import { ApiRouteError, apiError, apiSuccess, parseRouteId } from "@/lib/api";
+import { ApiRouteError, apiError, apiSuccess, parseRouteId, readJson } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
+import { getCampaignAudiencePreview, queueCampaignRecipients } from "@/lib/campaign-execution";
 import { appendCampaignEvent, syncCampaignOperationState } from "@/lib/campaign-infrastructure";
+import { assertRealCampaignStartReady } from "@/lib/operational-readiness";
 import { runCampaignSafetySimulation } from "@/lib/campaign-safety";
-import { createCampaignRecipients, syncCampaignCounters } from "@/lib/whatsapp-campaigns";
+import { syncCampaignCounters } from "@/lib/whatsapp-campaigns";
 import { prisma } from "@/lib/prisma";
 
 type RouteContext = {
@@ -20,6 +23,10 @@ type RouteContext = {
 
 export async function POST(_request: Request, context: RouteContext) {
   try {
+    const body = await readJson(_request).catch(() => ({}));
+    const confirmedAudience = Boolean(
+      body && typeof body === "object" && "confirmedAudience" in body ? body.confirmedAudience : false
+    );
     const user = await requireAuth();
     const { mandateId } = getMandateContext(user);
     const { id } = await context.params;
@@ -31,12 +38,21 @@ export async function POST(_request: Request, context: RouteContext) {
         mandateId
       },
       include: {
-        template: true
+        template: true,
+        audienceConfig: true
       }
     });
 
     if (!campaign) {
       throw new ApiRouteError(404, "Campanha não encontrada.", "NOT_FOUND");
+    }
+
+    if (!confirmedAudience) {
+      throw new ApiRouteError(
+        400,
+        "Confirme a revisao dos destinatarios antes de iniciar.",
+        "AUDIENCE_CONFIRMATION_REQUIRED"
+      );
     }
 
     if (campaign.template.status !== WhatsAppTemplateStatus.APPROVED) {
@@ -143,19 +159,78 @@ export async function POST(_request: Request, context: RouteContext) {
       );
     }
 
-    const recipientSummary = await createCampaignRecipients(
-      campaign.id,
+    const audienceFilter = {
+      birthdayMonthDay: campaign.audienceConfig?.birthdayMonthDay ?? null,
+      tags: campaign.audienceConfig?.tags ?? campaign.segmentTags,
+      groups: campaign.audienceConfig?.groups ?? [],
+      priorities: campaign.audienceConfig?.priorities ?? [],
+      locations: campaign.audienceConfig?.locations ?? [],
+      interests: campaign.audienceConfig?.interests ?? [],
+      contactTypes: campaign.audienceConfig?.contactTypes ?? [],
+      selectedContactIds: campaign.audienceConfig?.selectedContactIds ?? []
+    };
+    const selectedContactIds = campaign.audienceConfig?.selectedContactIds ?? [];
+    const audiencePreview = await getCampaignAudiencePreview({
       mandateId,
-      campaign.segmentTags
-    );
+      campaignId: campaign.id,
+      templateBody: campaign.template.body,
+      audienceFilter,
+      selectedContactIds,
+      selectedOnly: selectedContactIds.length > 0,
+      showOnlyEligible: false
+    });
 
-    if (recipientSummary.eligibleContacts === 0) {
-      throw new ApiRouteError(
-        400,
-        "Nenhum contato elegível encontrado. Verifique opt-in, status e tags do segmento.",
-        "NO_ELIGIBLE_CONTACTS"
+    console.info("[campaign-start] audience-check", {
+      campaignId: campaign.id,
+      mandateId,
+      selectedContactIds: selectedContactIds.length,
+      foundContacts: audiencePreview.totalEncontrados,
+      eligibleContacts: audiencePreview.totalElegiveis,
+      skippedContacts: Math.max(0, audiencePreview.totalMatched - audiencePreview.totalElegiveis),
+      blockedBy: audiencePreview.blockedBy
+    });
+
+    if (audiencePreview.totalElegiveis === 0) {
+      return NextResponse.json(
+        {
+          error: "Nenhum destinatário elegível",
+          details: {
+          selectedContactIds: selectedContactIds.length,
+          foundContacts: audiencePreview.totalEncontrados,
+          eligibleContacts: audiencePreview.totalElegiveis,
+          blockedBy: audiencePreview.blockedBy
+          }
+        },
+        { status: 400 }
       );
     }
+
+    await assertRealCampaignStartReady({
+      mandateId,
+      templateApproved: campaign.template.status === WhatsAppTemplateStatus.APPROVED,
+      audiencePreview: {
+        totalElegiveis: audiencePreview.totalElegiveis,
+        totalInvalidos: audiencePreview.totalInvalidos,
+        totalBloqueados: audiencePreview.totalBloqueados,
+        totalOptOut: audiencePreview.totalOptOut,
+        totalSemTelefone: audiencePreview.totalSemTelefone
+      }
+    });
+
+    await appendCampaignEvent({
+      mandateId,
+      campaignId: campaign.id,
+      eventType: "CAMPAIGN_AUDIENCE_CONFIRMED",
+      title: "Publico confirmado",
+      message: `${audiencePreview.totalElegiveis} destinatarios elegiveis confirmados para inicio supervisionado.`,
+      metadata: {
+        totalElegiveis: audiencePreview.totalElegiveis,
+        totalOptOut: audiencePreview.totalOptOut,
+        totalSemTelefone: audiencePreview.totalSemTelefone,
+        totalSemOptIn: audiencePreview.totalSemOptIn,
+        totalInvalidos: audiencePreview.totalInvalidos
+      }
+    });
 
     const updatedCampaign = await prisma.campaign.update({
       where: {
@@ -166,6 +241,13 @@ export async function POST(_request: Request, context: RouteContext) {
         dailyLimit: Math.min(campaign.dailyLimit, simulation.recommendedDailyLimit),
         delaySeconds: simulation.recommendedDelayMinSeconds
       }
+    });
+
+    const queuedBatch = await queueCampaignRecipients({
+      mandateId,
+      campaignId: campaign.id,
+      recommendedDailyLimit: simulation.recommendedDailyLimit,
+      recommendedDelaySeconds: simulation.recommendedDelayMinSeconds
     });
 
     await syncCampaignCounters(campaign.id);
@@ -184,9 +266,14 @@ export async function POST(_request: Request, context: RouteContext) {
     return apiSuccess({
       campaign: updatedCampaign,
       simulation,
-      createdRecipients: recipientSummary.createdRecipients,
-      eligibleContacts: recipientSummary.eligibleContacts,
-      message: "Campanha iniciada com plano seguro recomendado. Use o endpoint send-next para processar envios com throughput adaptativo."
+      createdRecipients: queuedBatch.recipientSummary.createdRecipients,
+      eligibleContacts: queuedBatch.recipientSummary.eligibleContacts,
+      queuedDeliveries: queuedBatch.queuedCount,
+      redirectTo: `/admin/campaigns/operations?campaignId=${campaign.id}`,
+      message:
+        queuedBatch.queuedCount > 0
+          ? "Campanha iniciada. Deliveries e fila de saída foram gerados; nada foi enviado diretamente para a Meta."
+          : "Campanha iniciada, mas nenhum novo delivery foi enfileirado nesta execução."
     });
   } catch (error) {
     return apiError(error);

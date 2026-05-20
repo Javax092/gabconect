@@ -102,6 +102,7 @@ export async function POST(request: Request, context: RouteContext) {
         scheduledFor,
         payload: {
           queueRecordId: "",
+          kind: "CONVERSATION",
           messageId: message.id,
           conversationId: conversation.id,
           mandateId,

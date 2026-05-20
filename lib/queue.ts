@@ -25,8 +25,9 @@ export type IncomingMessageJobPayload = {
   };
 };
 
-export type OutgoingMessageJobPayload = {
+export type ConversationOutgoingMessageJobPayload = {
   queueRecordId: string;
+  kind: "CONVERSATION";
   messageId: string;
   conversationId: string;
   mandateId: string;
@@ -35,6 +36,27 @@ export type OutgoingMessageJobPayload = {
   source: "AI" | "HUMAN" | "TEMPLATE";
   scheduledFor: string;
 };
+
+export type CampaignOutgoingMessageJobPayload = {
+  queueRecordId: string;
+  kind: "CAMPAIGN";
+  mandateId: string;
+  campaignId: string;
+  campaignRecipientId: string;
+  contactId: string;
+  phone: string;
+  contactName: string;
+  templateId: string;
+  templateBody: string;
+  metaTemplateName: string;
+  language: string;
+  personalizedText: string;
+  scheduledFor: string;
+};
+
+export type OutgoingMessageJobPayload =
+  | ConversationOutgoingMessageJobPayload
+  | CampaignOutgoingMessageJobPayload;
 
 export type HumanEscalationJobPayload = {
   queueRecordId: string;
@@ -195,7 +217,7 @@ export async function enqueueJob<T extends QueueName>(
       conversationId: conversationId ?? undefined,
       messageId: messageId ?? undefined,
       direction,
-      status: QueueStatus.PENDING,
+      status: QueueStatus.QUEUED,
       priority: normalizedPriority,
       scheduledFor,
       metadata: createQueueMetadata(payload)
@@ -220,8 +242,11 @@ export async function enqueueJob<T extends QueueName>(
     if (process.env.NODE_ENV === "production") {
       throw new Error("REDIS_URL ausente em produção. Redis é obrigatório para BullMQ.");
     }
-
-    await runDevFallback(name, enrichedPayload, scheduledFor);
+    if (fallbackProcessors[name]) {
+      await runDevFallback(name, enrichedPayload, scheduledFor);
+    } else {
+      showFallbackNotice();
+    }
 
     return {
       queued: false,
@@ -310,9 +335,16 @@ export async function createQueueWorker<T extends QueueName>(
     const payload = job.data as { queueRecordId?: string };
 
     if (payload?.queueRecordId) {
-      await updateQueueRecord(payload.queueRecordId, QueueStatus.SENT, {
-        processedAt: new Date(),
-        retryCount: job.attemptsMade
+      await prisma.messageQueue.updateMany({
+        where: {
+          id: payload.queueRecordId,
+          status: QueueStatus.PROCESSING
+        },
+        data: {
+          status: QueueStatus.SENT,
+          processedAt: new Date(),
+          retryCount: job.attemptsMade
+        }
       });
     }
   });

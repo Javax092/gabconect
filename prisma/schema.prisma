@@ -5,6 +5,7 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
@@ -40,9 +41,11 @@ enum AIActionType {
 }
 
 enum QueueStatus {
+  QUEUED
   PENDING
   PROCESSING
   SENT
+  SIMULATED_SENT
   FAILED
   CANCELLED
 }
@@ -167,6 +170,7 @@ enum WhatsAppMessageLogDirection {
 enum WhatsAppMessageLogStatus {
   ACCEPTED
   SENT
+  SIMULATED_SENT
   DELIVERED
   READ
   FAILED
@@ -216,6 +220,7 @@ model Mandate {
   trustRecoveryStates TrustRecoveryState[]
   optOutEvents   OptOutEvent[]
   whatsappMessageLogs WhatsAppMessageLog[]
+  workerHeartbeats WorkerHeartbeat[]
   createdAt      DateTime       @default(now())
 }
 
@@ -374,7 +379,7 @@ model MessageQueue {
   conversationId String?
   messageId      String?
   direction      MessageDirection
-  status         QueueStatus      @default(PENDING)
+  status         QueueStatus      @default(QUEUED)
   priority       QueuePriority    @default(NORMAL)
   scheduledFor   DateTime
   processedAt    DateTime?
@@ -432,6 +437,7 @@ model Contact {
   mandateId   String
   name        String
   phone       String
+  birthday    DateTime?
   source      String
   optIn       Boolean       @default(false)
   optInAt     DateTime?
@@ -446,6 +452,7 @@ model Contact {
 
   @@unique([mandateId, phone])
   @@index([mandateId, status, optIn])
+  @@index([mandateId, birthday])
   @@index([mandateId, createdAt])
 }
 
@@ -546,12 +553,14 @@ model WarmupRule {
 model CampaignAudienceConfig {
   id           String   @id @default(cuid())
   campaignId   String   @unique
+  birthdayMonthDay String?
   tags         String[]
   groups       String[]
   priorities   String[]
   locations    String[]
   interests    String[]
   contactTypes String[]
+  selectedContactIds String[]
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   campaign     Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -685,7 +694,9 @@ model CampaignRecipient {
   campaignId   String
   contactId    String
   status       CampaignRecipientStatus @default(PENDING)
+  queuedAt     DateTime?
   sentAt       DateTime?
+  messagePreview String?
   errorMessage String?
   createdAt    DateTime                @default(now())
   updatedAt    DateTime                @updatedAt
@@ -742,4 +753,18 @@ model WhatsAppMessageLog {
   @@index([campaignId, createdAt])
   @@index([campaignRecipientId, createdAt])
   @@index([providerMessageId])
+}
+
+model WorkerHeartbeat {
+  id         String   @id @default(cuid())
+  mandateId  String?
+  workerName String   @unique
+  status     String   @default("online")
+  note       String?
+  lastSeenAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  mandate    Mandate? @relation(fields: [mandateId], references: [id], onDelete: SetNull)
+
+  @@index([mandateId, workerName])
+  @@index([lastSeenAt])
 }

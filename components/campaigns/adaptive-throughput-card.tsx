@@ -17,15 +17,19 @@ export function AdaptiveThroughputCard({
 }: AdaptiveThroughputCardProps) {
   return (
     <article className="rounded-[24px] border border-cyan-400/20 bg-cyan-400/10 p-4">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200">Throughput adaptativo</p>
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200">Cadência operacional recomendada</p>
+      <p className="mt-2 text-sm leading-6 text-cyan-50/85">
+        Esta recomendação indica quantas mensagens podem ser processadas por ciclo e qual intervalo
+        deve ser mantido entre elas para proteger a operação.
+      </p>
       <div className="mt-4 grid grid-cols-2 gap-3">
         <Metric label="Limite seguro" value={`${recommendedDailyLimit}/dia`} />
-        <Metric label="Lotes" value={String(recommendedBatchSize)} />
-        <Metric label="Delay" value={`${delayMinSeconds}s`} />
-        <Metric label="Delay max" value={`${delayMaxSeconds}s`} />
+        <Metric label="Por ciclo" value={String(recommendedBatchSize)} />
+        <Metric label="Delay mínimo" value={`${delayMinSeconds}s`} />
+        <Metric label="Delay máximo" value={`${delayMaxSeconds}s`} />
       </div>
       {estimatedCompletionTime ? (
-        <p className="mt-4 text-sm text-cyan-50/90">Conclusao estimada: {estimatedCompletionTime}</p>
+        <p className="mt-4 text-sm text-cyan-50/90">Tempo estimado de processamento: {estimatedCompletionTime}</p>
       ) : null}
     </article>
   );

@@ -1,0 +1,7 @@
+-- AlterTable
+ALTER TABLE "CampaignAudienceConfig" ALTER COLUMN "tags" DROP DEFAULT,
+ALTER COLUMN "groups" DROP DEFAULT,
+ALTER COLUMN "priorities" DROP DEFAULT,
+ALTER COLUMN "locations" DROP DEFAULT,
+ALTER COLUMN "interests" DROP DEFAULT,
+ALTER COLUMN "contactTypes" DROP DEFAULT;

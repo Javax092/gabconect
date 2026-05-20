@@ -6,6 +6,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Cpu,
+  Database,
   Layers3,
   Megaphone,
   MessageSquareText,
@@ -48,6 +49,11 @@ const navigationItems: Array<{
     href: "/admin/campaigns",
     label: "Campanhas",
     icon: <Megaphone className="h-4 w-4" />
+  },
+  {
+    href: "/admin/contacts",
+    label: "Contatos",
+    icon: <Database className="h-4 w-4" />
   },
   {
     href: "/admin/ai",
@@ -143,7 +149,7 @@ export function AdminNav({
       </aside>
 
       <nav className="fixed inset-x-4 bottom-4 z-50 rounded-[24px] border border-slate-200 bg-white/95 p-2 shadow-[0_18px_45px_rgba(15,23,32,0.18)] backdrop-blur lg:hidden">
-        <div className="grid grid-cols-8 gap-1">
+        <div className="grid grid-cols-9 gap-1">
           {navigationItems.map((item) => {
             const active = matchesPath(pathname, item.href);
 

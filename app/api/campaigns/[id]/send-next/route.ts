@@ -1,21 +1,15 @@
 import {
-  CampaignRecipientStatus,
   CampaignStatus,
-  ContactStatus,
   OperationEventLevel,
   WhatsAppTemplateStatus
 } from "@prisma/client";
 
 import { ApiRouteError, apiError, apiSuccess, parseRouteId } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
+import { queueCampaignRecipients } from "@/lib/campaign-execution";
 import { appendCampaignEvent, syncCampaignOperationState } from "@/lib/campaign-infrastructure";
-import { runAdaptiveReputationEngine, runCampaignSafetySimulation } from "@/lib/campaign-safety";
-import {
-  markCampaignCompletedIfFinished,
-  sendWhatsAppTemplateMessage,
-  shouldPauseCampaignAfterFailure,
-  syncCampaignCounters
-} from "@/lib/whatsapp-campaigns";
+import { assertRealSendInfrastructureReady } from "@/lib/operational-readiness";
+import { runCampaignSafetySimulation } from "@/lib/campaign-safety";
 import { prisma } from "@/lib/prisma";
 
 type RouteContext = {
@@ -23,14 +17,6 @@ type RouteContext = {
     id: string;
   }>;
 };
-
-function getDayBounds(date = new Date()) {
-  const start = new Date(date);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { start, end };
-}
 
 export async function POST(_request: Request, context: RouteContext) {
   try {
@@ -56,7 +42,7 @@ export async function POST(_request: Request, context: RouteContext) {
     if (campaign.status !== CampaignStatus.RUNNING) {
       throw new ApiRouteError(
         400,
-        "A campanha precisa estar em execução para enviar o próximo lote.",
+        "A campanha precisa estar em execução para reabastecer a fila.",
         "INVALID_STATUS"
       );
     }
@@ -68,6 +54,8 @@ export async function POST(_request: Request, context: RouteContext) {
         "TEMPLATE_NOT_APPROVED"
       );
     }
+
+    await assertRealSendInfrastructureReady(mandateId);
 
     const simulation = await runCampaignSafetySimulation({
       mandateId,
@@ -129,273 +117,23 @@ export async function POST(_request: Request, context: RouteContext) {
       );
     }
 
-    const { start, end } = getDayBounds();
-    const dailySentCount = await prisma.campaignRecipient.count({
-      where: {
-        campaignId,
-        status: CampaignRecipientStatus.SENT,
-        sentAt: {
-          gte: start,
-          lt: end
-        }
-      }
-    });
-    const dailySafeLimit = Math.min(campaign.dailyLimit, simulation.recommendedDailyLimit);
-
-    if (dailySentCount >= dailySafeLimit) {
-      return apiSuccess({
-        campaignStatus: campaign.status,
-        dailyLimitReached: true,
-        safeLimit: dailySafeLimit,
-        message: "Limite seguro de envio atingido. Aguarde a proxima janela operacional."
-      });
-    }
-
-    const lastSentRecipient = await prisma.campaignRecipient.findFirst({
-      where: {
-        campaignId,
-        status: CampaignRecipientStatus.SENT,
-        sentAt: {
-          not: null
-        }
-      },
-      orderBy: {
-        sentAt: "desc"
-      },
-      select: {
-        sentAt: true
-      }
+    const queuedBatch = await queueCampaignRecipients({
+      mandateId,
+      campaignId,
+      recommendedDailyLimit: simulation.recommendedDailyLimit,
+      recommendedDelaySeconds: simulation.recommendedDelayMinSeconds
     });
 
-    if (lastSentRecipient?.sentAt) {
-      const nextAllowedAt = new Date(
-        lastSentRecipient.sentAt.getTime() + simulation.recommendedDelayMinSeconds * 1000
-      );
+    await syncCampaignOperationState(campaignId);
 
-      if (nextAllowedAt > new Date()) {
-        throw new ApiRouteError(
-          429,
-          `Aguarde até ${nextAllowedAt.toLocaleString("pt-BR")} para respeitar o intervalo entre envios.`,
-          "DELAY_NOT_ELAPSED"
-        );
-      }
-    }
-
-    const recentBatchRecipients = await prisma.campaignRecipient.findMany({
-      where: {
-        campaignId,
-        status: CampaignRecipientStatus.SENT,
-        sentAt: {
-          not: null
-        }
-      },
-      orderBy: {
-        sentAt: "desc"
-      },
-      take: simulation.recommendedBatchSize,
-      select: {
-        sentAt: true
-      }
+    return apiSuccess({
+      queuedDeliveries: queuedBatch.queuedCount,
+      safeDailyLimit: queuedBatch.safeDailyLimit,
+      message:
+        queuedBatch.queuedCount > 0
+          ? "Novo lote enfileirado com sucesso. O worker continua sendo o único ponto de envio."
+          : "Nenhum novo delivery foi enfileirado neste momento."
     });
-
-    if (recentBatchRecipients.length === simulation.recommendedBatchSize) {
-      const latestSentAt = recentBatchRecipients[0]?.sentAt;
-      const oldestSentAt = recentBatchRecipients.at(-1)?.sentAt;
-      const pauseBetweenBatchesSeconds = Math.max(
-        simulation.recommendedDelayMaxSeconds,
-        Math.round(simulation.recommendedDelayMinSeconds * 1.5)
-      );
-
-      if (latestSentAt && oldestSentAt) {
-        const batchSpanSeconds = (latestSentAt.getTime() - oldestSentAt.getTime()) / 1000;
-        const nextBatchAllowedAt = new Date(latestSentAt.getTime() + pauseBetweenBatchesSeconds * 1000);
-
-        if (batchSpanSeconds <= simulation.recommendedBatchSize * simulation.recommendedDelayMaxSeconds && nextBatchAllowedAt > new Date()) {
-          throw new ApiRouteError(
-            429,
-            `Lote recente concluido. Aguarde ate ${nextBatchAllowedAt.toLocaleString("pt-BR")} para a proxima janela segura.`,
-            "BATCH_COOLDOWN_ACTIVE"
-          );
-        }
-      }
-    }
-
-    const recipient = await prisma.campaignRecipient.findFirst({
-      where: {
-        campaignId,
-        status: CampaignRecipientStatus.PENDING
-      },
-      include: {
-        contact: true
-      },
-      orderBy: {
-        createdAt: "asc"
-      }
-    });
-
-    if (!recipient) {
-      await markCampaignCompletedIfFinished(campaignId);
-
-      return apiSuccess({
-        campaignStatus: CampaignStatus.COMPLETED,
-        message: "Campanha concluída. Não há destinatários pendentes."
-      });
-    }
-
-    if (!recipient.contact.optIn || recipient.contact.status !== ContactStatus.ACTIVE) {
-      const status =
-        recipient.contact.status === ContactStatus.UNSUBSCRIBED
-          ? CampaignRecipientStatus.UNSUBSCRIBED
-          : CampaignRecipientStatus.SKIPPED;
-
-      await prisma.campaignRecipient.update({
-        where: {
-          id: recipient.id
-        },
-        data: {
-          status,
-          errorMessage: "Contato inelegível para envio no momento da execução."
-        }
-      });
-
-      await syncCampaignCounters(campaignId);
-      await syncCampaignOperationState(campaignId);
-      await appendCampaignEvent({
-        mandateId,
-        campaignId,
-        eventType: "recipient.skipped",
-        title: "Contato removido do fluxo",
-        message: "Destinatario inelegivel no momento da execucao. O pipeline seguiu sem risco reputacional.",
-        recommendedAction: "Atualizar o status de opt-in antes de novo disparo."
-      });
-      await markCampaignCompletedIfFinished(campaignId);
-
-      return apiSuccess({
-        skipped: true,
-        recipientId: recipient.id,
-        reason: "Contato sem opt-in válido ou com status bloqueado."
-      });
-    }
-
-    try {
-      const delivery = await sendWhatsAppTemplateMessage({
-        mandateId,
-        campaignId,
-        campaignRecipientId: recipient.id,
-        contact: {
-          id: recipient.contact.id,
-          phone: recipient.contact.phone,
-          name: recipient.contact.name
-        },
-        template: {
-          id: campaign.template.id,
-          metaTemplateName: campaign.template.metaTemplateName,
-          language: campaign.template.language,
-          body: campaign.template.body,
-          status: campaign.template.status
-        }
-      });
-
-      await prisma.campaignRecipient.update({
-        where: {
-          id: recipient.id
-        },
-        data: {
-          status: CampaignRecipientStatus.SENT,
-          sentAt: delivery.sentAt,
-          errorMessage: null
-        }
-      });
-
-      await syncCampaignCounters(campaignId);
-      await prisma.campaign.update({
-        where: {
-          id: campaignId
-        },
-        data: {
-          dailyLimit: dailySafeLimit,
-          delaySeconds: simulation.recommendedDelayMinSeconds
-        }
-      });
-      await syncCampaignOperationState(campaignId);
-      await appendCampaignEvent({
-        mandateId,
-        campaignId,
-        campaignRecipientId: recipient.id,
-        eventType: "throughput.sent",
-        title: "Lote enviado",
-        message: "Template aceito pela Meta dentro da janela segura e com throughput adaptativo.",
-        recommendedAction:
-          simulation.recommendations[0] ??
-          "Manter cadencia gradual enquanto a reputacao permanecer estavel."
-      });
-      await runAdaptiveReputationEngine({
-        mandateId,
-        campaignId,
-        logAdjustment: true,
-        reason: "Entrega bem-sucedida registrada no throughput adaptativo."
-      });
-      await markCampaignCompletedIfFinished(campaignId);
-
-      return apiSuccess({
-        recipientId: recipient.id,
-        providerMessageId: delivery.providerMessageId,
-        sentAt: delivery.sentAt,
-        throughputPlan: {
-          recommendedBatchSize: simulation.recommendedBatchSize,
-          recommendedDelayMinSeconds: simulation.recommendedDelayMinSeconds,
-          recommendedDelayMaxSeconds: simulation.recommendedDelayMaxSeconds,
-          recommendedDailyLimit: dailySafeLimit
-        },
-        message: "Template aceito pela Meta e registrado em log."
-      });
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Falha ao enviar template da campanha.";
-
-      await prisma.campaignRecipient.update({
-        where: {
-          id: recipient.id
-        },
-        data: {
-          status: CampaignRecipientStatus.FAILED,
-          errorMessage
-        }
-      });
-
-      await syncCampaignCounters(campaignId);
-      await runAdaptiveReputationEngine({
-        mandateId,
-        campaignId,
-        logAdjustment: true,
-        reason: "Falha operacional registrada e usada para recalibrar reputacao."
-      });
-
-      if (await shouldPauseCampaignAfterFailure(campaignId)) {
-        await prisma.campaign.update({
-          where: {
-            id: campaignId
-          },
-          data: {
-            status: CampaignStatus.PAUSED
-          }
-        });
-        await appendCampaignEvent({
-          mandateId,
-          campaignId,
-          campaignRecipientId: recipient.id,
-          level: OperationEventLevel.CRITICAL,
-          eventType: "failsafe.triggered",
-          title: "Failsafe acionado",
-          message: "Sequencia de falhas acima do limite interrompeu a campanha preventivamente.",
-          recommendedAction: "Revisar template, saude do numero e qualidade do publico antes de retomar."
-        });
-      }
-
-      await syncCampaignOperationState(campaignId);
-
-      throw new ApiRouteError(502, errorMessage, "META_SEND_FAILED");
-    }
   } catch (error) {
     return apiError(error);
   }

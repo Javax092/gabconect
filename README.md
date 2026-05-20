@@ -53,6 +53,7 @@ Obrigatórias:
 - `AUTH_SECRET`
 - `WHATSAPP_ACCESS_TOKEN`
 - `WHATSAPP_PHONE_NUMBER_ID`
+- `WHATSAPP_DRY_RUN`
 - `WHATSAPP_VERIFY_TOKEN`
 - `META_APP_SECRET`
 - `OPENAI_API_KEY`
@@ -67,6 +68,12 @@ Variáveis opcionais do seed:
 - `SEED_WHATSAPP_NUMBER`
 - `SEED_AI_PROMPT`
 - `SEED_INCLUDE_SAMPLE_DATA`
+
+Recomendado para operação real supervisionada:
+
+- `NEXT_PUBLIC_DEMO_MODE=false`
+- `WHATSAPP_DRY_RUN=true` no primeiro teste
+- `APP_URL` apontando para a URL pública usada no webhook
 
 Observação: o seed atual usa valores internos fixos para o admin e para o mandato principal. As variáveis antigas listadas abaixo não são mais consumidas pelo script atual:
 
@@ -148,6 +155,7 @@ Ele cria ou atualiza:
 - categorias padrão
 - configurações padrão de campanhas
 - 6 contatos demo com números fictícios em formato internacional
+- contato fake `João Teste` com `optIn=true` e aniversário na data atual
 - contatos com `optIn: true` e pelo menos um com `optIn: false`
 - tags como `lideranca`, `bairro`, `evento`, `academia`, `teste`
 - 3 templates WhatsApp demo:
@@ -185,6 +193,12 @@ npm run worker:outgoing
 npm run worker:human
 npm run worker:all
 ```
+
+Observação operacional:
+
+- o app web abre sem Redis em desenvolvimento
+- fallback local só deve ser usado em desenvolvimento/teste
+- envio real exige `REDIS_URL`, BullMQ ativo e heartbeat recente do `worker:outgoing`
 
 ## Webhook Meta
 
@@ -276,8 +290,72 @@ Observações importantes:
 
 - o sistema não faz envio em massa automático
 - criar campanha não dispara mensagens
-- o processamento real depende do endpoint `send-next`
+- `start` e `send-next` apenas enfileiram deliveries; o worker é o único ponto que envia
 - tokens sensíveis do WhatsApp nunca são expostos no frontend
+
+## Teste seguro de campanhas
+
+Fluxo obrigatório:
+
+```text
+Campaign
+→ CampaignRecipient
+→ outgoing-message queue
+→ worker
+→ WhatsApp Sender
+→ webhook de status
+```
+
+Dry-run local:
+
+1. Defina `WHATSAPP_DRY_RUN=true`.
+2. Rode `npx prisma db seed`.
+3. Suba `npm run dev`.
+4. Inicie uma campanha normal ou use o botão `Teste aniversario` em `/admin/campaigns`.
+5. Verifique no Prisma Studio:
+- `CampaignRecipient.queuedAt`
+- `CampaignRecipient.messagePreview`
+- `MessageQueue.status = QUEUED`
+- `WhatsAppMessageLog.status = SIMULATED_SENT` depois do worker
+6. Rode `npm run worker:outgoing` para processar localmente sem chamar a Meta.
+
+Guardrails do modo teste:
+
+- limite local de até `3` mensagens por execução
+- bloqueio fora do horário comercial `08:00-18:00`
+- nenhuma chamada real para a Meta quando `WHATSAPP_DRY_RUN=true`
+
+## Checklist operacional no admin
+
+O app agora centraliza em `/admin` e `/admin/whatsapp`:
+
+- status do WhatsApp
+- webhook endpoint
+- checklist visual de `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `META_APP_SECRET`, `APP_URL`, `REDIS_URL` e `OPENAI_API_KEY`
+- status das filas
+- heartbeat dos workers
+- último evento recebido
+- último envio realizado
+- erros recentes
+- modo atual: `Modo simulação` ou `Envio real`
+
+## Contatos
+
+Nova central operacional:
+
+- `/admin/contacts`
+- cadastro manual
+- importação CSV
+- busca por nome, telefone ou código
+- visualização de opt-in/opt-out
+- seleção direta para campanhas por query string
+
+Formato CSV suportado:
+
+```text
+name;phone;tags;optIn;birthday;status
+Maria Teste;+5592999991111;lideranca,teste;true;1988-05-10;ACTIVE
+```
 
 ## Painel admin
 
@@ -373,6 +451,43 @@ npm run lint
 - `ComplianceLog`
 - `AIAction`
 - `HumanTakeover`
+
+### Dry-run seguro
+
+1. Configure `NEXT_PUBLIC_DEMO_MODE=false`.
+2. Defina `WHATSAPP_DRY_RUN=true`.
+3. Rode a migration pendente e o seed.
+4. Suba `npm run dev`.
+5. Rode `npm run worker:outgoing` ou `npm run worker:all`.
+6. Cadastre um contato próprio em `/admin/contacts`.
+7. Vá para `/admin/campaigns`.
+8. Escolha um template aprovado.
+9. Selecione manualmente o contato.
+10. Revise destinatários e confirme o preflight.
+11. Inicie a operação.
+12. Verifique `SIMULATED_SENT` em `WhatsAppMessageLog`.
+
+### Primeiro teste real
+
+1. Defina `WHATSAPP_DRY_RUN=false`.
+2. Use apenas 1 contato próprio.
+3. Confirme `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `META_APP_SECRET`, `APP_URL`, `REDIS_URL` e `OPENAI_API_KEY`.
+4. Rode `npm run worker:outgoing` e confirme heartbeat no admin.
+5. Use template aprovado na Meta.
+6. Revise o preflight e confirme o envio.
+7. Acompanhe em `/admin/campaigns/operations`.
+8. Valide status `SENT` ou `FAILED`.
+9. Se falhar, revise o erro da Meta no admin e em `WhatsAppMessageLog`.
+
+### Comandos de validação usados neste ajuste
+
+```bash
+npx prisma validate
+npx prisma generate
+npx prisma migrate status
+npm run typecheck
+npm run build
+```
 
 ## Status atual
 

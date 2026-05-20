@@ -3,10 +3,15 @@
 import type { Route } from "next";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Search, SlidersHorizontal, X } from "lucide-react";
-import { DemandPriority, DemandStatus } from "@prisma/client";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  DEMAND_PRIORITY_VALUES,
+  DEMAND_STATUS_VALUES,
+  type DemandPriorityValue,
+  type DemandStatusValue
+} from "@/lib/prisma-enums";
 
 type DemandFiltersFormProps = {
   categories: Array<{
@@ -15,17 +20,17 @@ type DemandFiltersFormProps = {
   }>;
 };
 
-const statusOptions: Array<{ value: DemandStatus; label: string }> = [
-  { value: DemandStatus.NEW, label: "Nova" },
-  { value: DemandStatus.IN_PROGRESS, label: "Em andamento" },
-  { value: DemandStatus.RESOLVED, label: "Resolvida" },
-  { value: DemandStatus.REJECTED, label: "Rejeitada" }
+const statusOptions: Array<{ value: DemandStatusValue; label: string }> = [
+  { value: DEMAND_STATUS_VALUES[0], label: "Nova" },
+  { value: DEMAND_STATUS_VALUES[1], label: "Em andamento" },
+  { value: DEMAND_STATUS_VALUES[2], label: "Resolvida" },
+  { value: DEMAND_STATUS_VALUES[3], label: "Rejeitada" }
 ];
 
-const priorityOptions: Array<{ value: DemandPriority; label: string }> = [
-  { value: DemandPriority.LOW, label: "Baixa" },
-  { value: DemandPriority.MEDIUM, label: "Média" },
-  { value: DemandPriority.HIGH, label: "Alta" }
+const priorityOptions: Array<{ value: DemandPriorityValue; label: string }> = [
+  { value: DEMAND_PRIORITY_VALUES[0], label: "Baixa" },
+  { value: DEMAND_PRIORITY_VALUES[1], label: "Média" },
+  { value: DEMAND_PRIORITY_VALUES[2], label: "Alta" }
 ];
 
 export function DemandFiltersForm({ categories }: DemandFiltersFormProps) {

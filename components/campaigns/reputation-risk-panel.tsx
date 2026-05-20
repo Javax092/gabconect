@@ -18,11 +18,14 @@ export function ReputationRiskPanel({
   return (
     <article className="rounded-[24px] border border-white/10 bg-slate-950/55 p-4">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Reputacao operacional</p>
+      <p className="mt-2 text-sm leading-6 text-slate-300">
+        Este painel resume o nível de segurança atual da operação antes do envio.
+      </p>
       <div className="mt-4 grid grid-cols-2 gap-3">
-        <Metric label="Safety score" value={String(safetyScore)} />
+        <Metric label="Índice de segurança" value={String(safetyScore)} />
         <Metric label="Risco estimado" value={riskLevel} />
-        <Metric label="Reputacao atual" value={`${reputationScore}/100`} />
-        <Metric label="Trust level" value={trustLevel ?? "Supervisionado"} />
+        <Metric label="Reputação atual" value={`${reputationScore}/100`} />
+        <Metric label="Nível de confiança" value={trustLevel ?? "Supervisionado"} />
       </div>
       {qualityRating ? (
         <p className="mt-4 text-sm text-slate-300">Qualidade operacional atual: {qualityRating}</p>

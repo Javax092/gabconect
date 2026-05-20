@@ -44,10 +44,12 @@ async function ensureCampaignDefaults(mandateId: string) {
 }
 
 async function seedCampaignData(mandateId: string) {
+  const today = new Date();
   const contacts = [
     {
       name: "Marina Alves",
       phone: "+15550001001",
+      birthday: new Date("1991-02-14T00:00:00.000Z"),
       source: "SEED_DEMO",
       optIn: true,
       optInAt: new Date("2026-05-10T14:00:00.000Z"),
@@ -57,6 +59,7 @@ async function seedCampaignData(mandateId: string) {
     {
       name: "Rafael Costa",
       phone: "+15550001002",
+      birthday: new Date("1988-08-22T00:00:00.000Z"),
       source: "SEED_DEMO",
       optIn: true,
       optInAt: new Date("2026-05-10T14:05:00.000Z"),
@@ -66,6 +69,7 @@ async function seedCampaignData(mandateId: string) {
     {
       name: "Patricia Nogueira",
       phone: "+15550001003",
+      birthday: new Date("1993-09-03T00:00:00.000Z"),
       source: "SEED_DEMO",
       optIn: false,
       optInAt: null,
@@ -75,6 +79,7 @@ async function seedCampaignData(mandateId: string) {
     {
       name: "Bruno Martins",
       phone: "+15550001004",
+      birthday: new Date("1990-01-09T00:00:00.000Z"),
       source: "SEED_DEMO",
       optIn: true,
       optInAt: new Date("2026-05-11T09:15:00.000Z"),
@@ -84,6 +89,7 @@ async function seedCampaignData(mandateId: string) {
     {
       name: "Camila Freitas",
       phone: "+15550001005",
+      birthday: new Date("1996-12-27T00:00:00.000Z"),
       source: "SEED_DEMO",
       optIn: true,
       optInAt: new Date("2026-05-11T10:20:00.000Z"),
@@ -93,11 +99,22 @@ async function seedCampaignData(mandateId: string) {
     {
       name: "Diego Santana",
       phone: "+15550001006",
+      birthday: new Date("1987-06-18T00:00:00.000Z"),
       source: "SEED_DEMO",
       optIn: true,
       optInAt: new Date("2026-05-12T08:45:00.000Z"),
       status: "ACTIVE" as const,
       tags: ["teste", "academia"]
+    },
+    {
+      name: "João Teste",
+      phone: "5592999990001",
+      birthday: today,
+      source: "SEED_TEST",
+      optIn: true,
+      optInAt: today,
+      status: "ACTIVE" as const,
+      tags: ["aniversario", "teste-local"]
     }
   ];
 
@@ -106,11 +123,12 @@ async function seedCampaignData(mandateId: string) {
       where: {
         mandateId_phone: {
           mandateId,
-          phone: contact.phone
+        phone: contact.phone
         }
       },
       update: {
         name: contact.name,
+        birthday: contact.birthday,
         source: contact.source,
         optIn: contact.optIn,
         optInAt: contact.optInAt,
@@ -125,6 +143,15 @@ async function seedCampaignData(mandateId: string) {
   }
 
   const templates = [
+    {
+      name: "Feliz aniversario teste",
+      metaTemplateName: "feliz_aniversario_teste",
+      language: "pt_BR",
+      category: WhatsAppTemplateCategory.MARKETING,
+      status: WhatsAppTemplateStatus.APPROVED,
+      body:
+        "Olá, {{firstName}}, feliz aniversário! O gabinete deseja um ótimo dia e segue à disposição."
+    },
     {
       name: "Campanha informativo",
       metaTemplateName: "campanha_informativo",

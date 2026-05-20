@@ -13,7 +13,11 @@ import { isDemoMode } from "@/lib/demo";
 import { countAudienceContacts } from "@/lib/campaign-infrastructure";
 import { prisma } from "@/lib/prisma";
 
-export default async function CampaignsPage() {
+type PageProps = {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+};
+
+export default async function CampaignsPage({ searchParams }: PageProps) {
   if (isDemoMode()) {
     return (
       <div className="space-y-6">
@@ -33,6 +37,14 @@ export default async function CampaignsPage() {
   }
 
   const user = await requireUser();
+  const params = (await searchParams) ?? {};
+  const initialPreflightCampaignId =
+    typeof params.preflightCampaignId === "string" ? params.preflightCampaignId : null;
+  const selectedFromContacts = Array.isArray(params.selectedContactIds)
+    ? params.selectedContactIds.filter((value): value is string => typeof value === "string")
+    : typeof params.selectedContactIds === "string"
+      ? [params.selectedContactIds]
+      : [];
 
   const [templates, campaigns, contacts, settings] = await Promise.all([
     prisma.whatsAppTemplate.findMany({
@@ -94,26 +106,26 @@ export default async function CampaignsPage() {
     <div className="space-y-6">
       <PageHeader
         eyebrow="Campanhas"
-        title="Orquestracao operacional de campanhas"
-        description="Estado atual, risco, throughput adaptativo, reputacao operacional e filas em execucao."
+        title="Central de campanhas WhatsApp"
+        description="Crie campanhas, revise destinatários, valide a operação e acompanhe o envio supervisionado do início ao pós-start."
         icon={<Megaphone className="h-5 w-5" />}
         aside={
           <div className="space-y-3">
             <div className="rounded-[24px] border border-white/10 bg-[#07111e] px-5 py-4 text-sm text-slate-300">
-              Templates aprovados, distribuicao responsavel e compliance operacional.
+              Templates oficiais, audiência revisada, fila supervisionada e compliance ativo.
             </div>
             <Link
               href="/admin/campaigns/settings"
               className={buttonVariants("secondary") + " w-full border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]"}
             >
-              Politicas de campanhas
+              Regras operacionais
             </Link>
             <Link
               href="/admin/campaigns/operations"
               className={buttonVariants("primary") + " w-full gap-2"}
             >
               <Radar className="h-4 w-4" />
-              Command center
+              Acompanhar operação
             </Link>
           </div>
         }
@@ -136,8 +148,8 @@ export default async function CampaignsPage() {
         </div>
         <div className="mt-5 grid gap-2 text-sm text-slate-400 lg:grid-cols-3">
           <p>Todo envio usa template oficial aprovado na Meta.</p>
-          <p>Status `UNSUBSCRIBED`, `BLOCKED` e `INVALID` saem da fila automaticamente.</p>
-          <p>Respostas de opt-out geram descadastro imediato via webhook.</p>
+          <p>Contatos bloqueados, inválidos ou com opt-out ficam fora da fila automaticamente.</p>
+          <p>Respostas de opt-out geram descadastro imediato e proteção da operação.</p>
         </div>
       </SectionCard>
 
@@ -149,12 +161,14 @@ export default async function CampaignsPage() {
             segmentTags: campaign.segmentTags,
             audienceConfig: campaign.audienceConfig
               ? {
+                  birthdayMonthDay: campaign.audienceConfig.birthdayMonthDay,
                   tags: campaign.audienceConfig.tags,
                   groups: campaign.audienceConfig.groups,
                   priorities: campaign.audienceConfig.priorities,
                   locations: campaign.audienceConfig.locations,
                   interests: campaign.audienceConfig.interests,
-                  contactTypes: campaign.audienceConfig.contactTypes
+                  contactTypes: campaign.audienceConfig.contactTypes,
+                  selectedContactIds: campaign.audienceConfig.selectedContactIds
                 }
               : null,
             status: campaign.status,
@@ -219,6 +233,9 @@ export default async function CampaignsPage() {
           availableTags={availableTags}
           audienceOptions={snapshot.audienceOptions}
           initialEligibleCount={initialEligibleCount}
+          initialPreflightCampaignId={initialPreflightCampaignId}
+          initialSelectedContactIds={selectedFromContacts}
+          deliveryMode={process.env.WHATSAPP_DRY_RUN === "true" ? "SIMULACAO" : "REAL"}
           initialSettings={{
             defaultDailyLimit: settings.defaultDailyLimit,
           defaultDelaySeconds: settings.defaultDelaySeconds,

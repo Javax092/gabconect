@@ -7,8 +7,8 @@ import {
   WhatsAppTemplateStatus
 } from "@prisma/client";
 
+import { materializeCampaignAudience } from "@/lib/campaign-audience";
 import { prisma } from "@/lib/prisma";
-import { flattenAudience } from "@/lib/campaign-infrastructure";
 import { DEFAULT_CAMPAIGN_SETTINGS, getCampaignSettings } from "@/lib/campaign-settings";
 
 const WHATSAPP_GRAPH_VERSION = "v23.0";
@@ -98,49 +98,56 @@ export async function syncCampaignCounters(campaignId: string) {
   });
 }
 
-export async function createCampaignRecipients(campaignId: string, mandateId: string, tags: string[]) {
+export async function createCampaignRecipients(
+  campaignId: string,
+  mandateId: string,
+  tags: string[],
+  options?: {
+    birthdayMonthDay?: string | null;
+    templateBody?: string;
+    audienceFilter?: {
+      birthdayMonthDay?: string | null;
+      tags?: string[];
+      groups?: string[];
+      priorities?: string[];
+      locations?: string[];
+      interests?: string[];
+      contactTypes?: string[];
+      selectedContactIds?: string[];
+    };
+  }
+) {
   const audience = await prisma.campaignAudienceConfig.findUnique({
     where: {
       campaignId
     }
   });
-  const audienceTags = audience
-    ? flattenAudience(audience).map((term) => term.toLowerCase())
-    : tags;
-  const [contacts, existingRecipients] = await Promise.all([
-    prisma.contact.findMany({
-      where: getEligibleContactWhere(mandateId, audienceTags),
-      select: {
-        id: true
-      }
-    }),
-    prisma.campaignRecipient.findMany({
-      where: {
-        campaignId
-      },
-      select: {
-        contactId: true
-      }
-    })
-  ]);
-
-  const existingContactIds = new Set(existingRecipients.map((recipient) => recipient.contactId));
-  const newRecipients = contacts
-    .filter((contact) => !existingContactIds.has(contact.id))
-    .map((contact) => ({
-      campaignId,
-      contactId: contact.id
-    }));
-
-  if (newRecipients.length > 0) {
-    await prisma.campaignRecipient.createMany({
-      data: newRecipients
-    });
-  }
+  const audienceFilter = options?.audienceFilter ?? {
+    birthdayMonthDay: options?.birthdayMonthDay ?? audience?.birthdayMonthDay ?? null,
+      tags: audience?.tags ?? tags,
+      groups: audience?.groups ?? [],
+      priorities: audience?.priorities ?? [],
+      locations: audience?.locations ?? [],
+      interests: audience?.interests ?? [],
+      contactTypes: audience?.contactTypes ?? [],
+      selectedContactIds: audience?.selectedContactIds ?? []
+    };
+  const materialized = await materializeCampaignAudience({
+    campaignId,
+    mandateId,
+    templateBody: options?.templateBody ?? "",
+    audienceFilter,
+    selectedContactIds: audienceFilter.selectedContactIds ?? []
+  });
 
   return {
-    eligibleContacts: contacts.length,
-    createdRecipients: newRecipients.length
+    eligibleContacts: materialized.totalElegiveis,
+    createdRecipients: materialized.createdRecipients,
+    totalInvalidos: materialized.totalInvalidos,
+    totalBloqueados: materialized.totalBloqueados,
+    totalOptOut: materialized.totalOptOut,
+    totalSemTelefone: materialized.totalSemTelefone,
+    totalSemOptIn: materialized.totalSemOptIn
   };
 }
 

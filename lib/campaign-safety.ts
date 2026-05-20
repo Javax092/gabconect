@@ -57,13 +57,22 @@ function getAudienceTerms(audience: {
 
 function buildAudienceWhere(
   mandateId: string,
-  audience: Parameters<typeof getAudienceTerms>[0],
+  audience: Parameters<typeof getAudienceTerms>[0] & {
+    selectedContactIds?: string[];
+  },
   optedOnly: boolean
 ): Prisma.ContactWhereInput {
   const terms = [...new Set(getAudienceTerms(audience))];
 
   return {
     mandateId,
+    ...(audience.selectedContactIds && audience.selectedContactIds.length > 0
+      ? {
+          id: {
+            in: audience.selectedContactIds
+          }
+        }
+      : {}),
     ...(optedOnly
       ? {
           optIn: true,
@@ -547,7 +556,8 @@ export async function runCampaignSafetySimulation(input: {
     priorities: [],
     locations: [],
     interests: [],
-    contactTypes: []
+    contactTypes: [],
+    selectedContactIds: []
   };
   const audienceTerms = getAudienceTerms(audienceConfig);
   const since24h = getWindowStart(1);

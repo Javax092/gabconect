@@ -2,11 +2,16 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { DemandPriority, DemandStatus } from "@prisma/client";
 import { ArrowRightLeft, LoaderCircle, Save } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  DEMAND_PRIORITY_VALUES,
+  DEMAND_STATUS_VALUES,
+  type DemandPriorityValue,
+  type DemandStatusValue
+} from "@/lib/prisma-enums";
 import { getApiErrorMessage } from "@/lib/utils";
 
 type DemandEditFormProps = {
@@ -14,8 +19,8 @@ type DemandEditFormProps = {
     id: string;
     title: string;
     description: string;
-    status: DemandStatus;
-    priority: DemandPriority;
+    status: DemandStatusValue;
+    priority: DemandPriorityValue;
     categoryId: string;
   };
   categories: Array<{
@@ -24,25 +29,25 @@ type DemandEditFormProps = {
   }>;
 };
 
-const statusOptions: Array<{ value: DemandStatus; label: string }> = [
-  { value: DemandStatus.NEW, label: "Nova" },
-  { value: DemandStatus.IN_PROGRESS, label: "Em andamento" },
-  { value: DemandStatus.RESOLVED, label: "Resolvida" },
-  { value: DemandStatus.REJECTED, label: "Rejeitada" }
+const statusOptions: Array<{ value: DemandStatusValue; label: string }> = [
+  { value: DEMAND_STATUS_VALUES[0], label: "Nova" },
+  { value: DEMAND_STATUS_VALUES[1], label: "Em andamento" },
+  { value: DEMAND_STATUS_VALUES[2], label: "Resolvida" },
+  { value: DEMAND_STATUS_VALUES[3], label: "Rejeitada" }
 ];
 
-const priorityOptions: Array<{ value: DemandPriority; label: string }> = [
-  { value: DemandPriority.LOW, label: "Baixa" },
-  { value: DemandPriority.MEDIUM, label: "Média" },
-  { value: DemandPriority.HIGH, label: "Alta" }
+const priorityOptions: Array<{ value: DemandPriorityValue; label: string }> = [
+  { value: DEMAND_PRIORITY_VALUES[0], label: "Baixa" },
+  { value: DEMAND_PRIORITY_VALUES[1], label: "Média" },
+  { value: DEMAND_PRIORITY_VALUES[2], label: "Alta" }
 ];
 
 export function DemandEditForm({ demand, categories }: DemandEditFormProps) {
   const router = useRouter();
   const [title, setTitle] = useState(demand.title);
   const [description, setDescription] = useState(demand.description);
-  const [status, setStatus] = useState<DemandStatus>(demand.status);
-  const [priority, setPriority] = useState<DemandPriority>(demand.priority);
+  const [status, setStatus] = useState<DemandStatusValue>(demand.status);
+  const [priority, setPriority] = useState<DemandPriorityValue>(demand.priority);
   const [categoryId, setCategoryId] = useState(demand.categoryId);
   const [pending, setPending] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -85,7 +90,7 @@ export function DemandEditForm({ demand, categories }: DemandEditFormProps) {
     }
   }
 
-  async function applyQuickStatus(nextStatus: DemandStatus) {
+  async function applyQuickStatus(nextStatus: DemandStatusValue) {
     setStatus(nextStatus);
     setPending(true);
     setFeedback(null);
@@ -147,7 +152,7 @@ export function DemandEditForm({ demand, categories }: DemandEditFormProps) {
             type="button"
             variant="secondary"
             disabled={pending}
-            onClick={() => applyQuickStatus(DemandStatus.NEW)}
+            onClick={() => applyQuickStatus(DEMAND_STATUS_VALUES[0])}
           >
             Marcar como nova
           </Button>
@@ -155,7 +160,7 @@ export function DemandEditForm({ demand, categories }: DemandEditFormProps) {
             type="button"
             variant="secondary"
             disabled={pending}
-            onClick={() => applyQuickStatus(DemandStatus.IN_PROGRESS)}
+            onClick={() => applyQuickStatus(DEMAND_STATUS_VALUES[1])}
           >
             Colocar em andamento
           </Button>
@@ -163,7 +168,7 @@ export function DemandEditForm({ demand, categories }: DemandEditFormProps) {
             type="button"
             variant="success"
             disabled={pending}
-            onClick={() => applyQuickStatus(DemandStatus.RESOLVED)}
+            onClick={() => applyQuickStatus(DEMAND_STATUS_VALUES[2])}
           >
             Marcar como resolvida
           </Button>
@@ -197,7 +202,7 @@ export function DemandEditForm({ demand, categories }: DemandEditFormProps) {
           <select
             id="status"
             value={status}
-            onChange={(event) => setStatus(event.target.value as DemandStatus)}
+            onChange={(event) => setStatus(event.target.value as DemandStatusValue)}
             className="flex h-12 w-full rounded-2xl border border-line bg-white px-4 text-sm text-ink shadow-sm outline-none transition focus:border-brand-400 focus:ring-4 focus:ring-brand-100"
           >
             {statusOptions.map((option) => (
@@ -215,7 +220,7 @@ export function DemandEditForm({ demand, categories }: DemandEditFormProps) {
           <select
             id="priority"
             value={priority}
-            onChange={(event) => setPriority(event.target.value as DemandPriority)}
+            onChange={(event) => setPriority(event.target.value as DemandPriorityValue)}
             className="flex h-12 w-full rounded-2xl border border-line bg-white px-4 text-sm text-ink shadow-sm outline-none transition focus:border-brand-400 focus:ring-4 focus:ring-brand-100"
           >
             {priorityOptions.map((option) => (

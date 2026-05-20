@@ -12,6 +12,7 @@ import {
 import { processCitizenMessage } from "@/lib/ai";
 import { ensureDefaultCategoriesForMandate } from "@/lib/categories";
 import { canSendMessage, validateConversationWindow } from "@/lib/compliance";
+import { processCampaignOutgoingJob } from "@/lib/campaign-execution";
 import { createOrUpdateDemandFromAIResult } from "@/lib/demands";
 import { humanizeResponseTiming, normalizeAssistantReply } from "@/lib/humanizer";
 import { prisma } from "@/lib/prisma";
@@ -150,6 +151,7 @@ async function queueOutboundMessage(input: {
     scheduledFor: input.scheduledFor,
     payload: {
       queueRecordId: "",
+      kind: "CONVERSATION",
       messageId: message.id,
       conversationId: input.conversationId,
       mandateId: input.mandateId,
@@ -466,6 +468,11 @@ export async function processIncomingMessageJob(payload: IncomingMessageJobPaylo
 }
 
 export async function processOutgoingMessageJob(payload: OutgoingMessageJobPayload) {
+  if (payload.kind === "CAMPAIGN") {
+    await processCampaignOutgoingJob(payload);
+    return;
+  }
+
   await updateQueueRecord(payload.queueRecordId, QueueStatus.PROCESSING);
 
   const message = await prisma.message.findUnique({
