@@ -4,17 +4,21 @@ import type { Route } from "next";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  AlertTriangle,
-  Megaphone,
+  CheckCircle2,
+  Clock3,
+  Eye,
   Pause,
   Play,
-  RefreshCw
+  RefreshCw,
+  Search,
+  Send,
+  XCircle
 } from "lucide-react";
 
 import { PreflightCheckModal } from "@/components/campaigns/preflight-check-modal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { getApiErrorMessage } from "@/lib/utils";
+import { cn, getApiErrorMessage } from "@/lib/utils";
 
 type TemplateOption = {
   id: string;
@@ -91,10 +95,13 @@ type CampaignItem = {
   } | null;
   stats: {
     PENDING: number;
+    PROCESSING: number;
+    QUEUED: number;
     SENT: number;
     FAILED: number;
     SKIPPED: number;
     UNSUBSCRIBED: number;
+    CANCELLED: number;
     total: number;
   };
 };
@@ -198,51 +205,11 @@ const AUDIENCE_SECTIONS: Array<{
   { key: "contactTypes", label: "Tipo de contato" }
 ];
 
-const ONBOARDING_STEPS = [
-  {
-    title: "1. Escolha o template",
-    description:
-      "Selecione um template oficial aprovado. Esse é o modelo validado pela Meta que será usado no envio."
-  },
-  {
-    title: "2. Selecione os destinatários",
-    description:
-      "Busque contatos, aplique filtros e monte a lista manualmente. O sistema mostra quem pode seguir para revisão."
-  },
-  {
-    title: "3. Revise a audiência",
-    description:
-      "Confira selecionados, encontrados, elegíveis e bloqueios críticos antes de criar a campanha."
-  },
-  {
-    title: "4. Confirme o envio",
-    description:
-      "Valide a operação, revise o resumo operacional e autorize a entrada da campanha na fila supervisionada."
-  },
-  {
-    title: "5. Acompanhe a operação",
-    description:
-      "Monitore status, timeline e eventos de processamento em tempo real até enviados, falhas e itens ignorados."
-  }
-] as const;
+const WIZARD_STEPS = ["Template", "Audiência", "Revisão", "Confirmar envio"] as const;
 
-const HOW_DELIVERY_WORKS = [
-  "Os destinatários passam por revisão de elegibilidade antes de entrar na operação.",
-  "Somente contatos elegíveis são colocados na fila operacional.",
-  "O worker processa os envios gradualmente, sem disparo instantâneo.",
-  "O delay humano distribui as mensagens em cadência segura para proteger a operação.",
-  "O compliance aplica bloqueios e salvaguardas automaticamente quando necessário.",
-  "A timeline operacional registra eventos em tempo real para acompanhamento."
-] as const;
+const DETAIL_TABS = ["Resumo", "Resultados", "Timeline", "Audiência"] as const;
 
-const FIRST_CAMPAIGN_STEPS = [
-  "Crie a campanha com nome, template oficial e parâmetros operacionais.",
-  "Selecione manualmente os contatos que devem participar deste envio.",
-  "Revise a audiência e confirme quem está elegível, bloqueado ou sem opt-in.",
-  "Confirme o envio para colocar a campanha na fila supervisionada.",
-  "Acompanhe a operação em tempo real na central operacional.",
-  "Ao final, verifique enviados, simulados, falhas e itens ignorados."
-] as const;
+type DetailTab = (typeof DETAIL_TABS)[number];
 
 const REFRESH_INTERVAL_MS = 20000;
 
@@ -289,6 +256,11 @@ export function CampaignsManager({
   const [audience, setAudience] = useState<AudienceConfig>(initialAudience);
   const [eligibleCount, setEligibleCount] = useState(initialEligibleCount);
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
+  const [activeWizardStep, setActiveWizardStep] = useState(0);
+  const [detailTab, setDetailTab] = useState<DetailTab>("Resumo");
+  const [selectedDetailCampaignId, setSelectedDetailCampaignId] = useState<string | null>(
+    initialCampaigns[0]?.id ?? null
+  );
   const [pending, setPending] = useState(false);
   const [preflightOpen, setPreflightOpen] = useState(false);
   const [preflightLoading, setPreflightLoading] = useState(false);
@@ -310,7 +282,6 @@ export function CampaignsManager({
   const [bootstrappedPreflight, setBootstrappedPreflight] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const selectedContactIds = useMemo(
     () => audience.selectedContactIds ?? [],
     [audience.selectedContactIds]
@@ -319,6 +290,17 @@ export function CampaignsManager({
   useEffect(() => {
     setCampaigns(initialCampaigns.map(normalizeCampaign));
   }, [initialCampaigns]);
+
+  useEffect(() => {
+    if (campaigns.length === 0) {
+      setSelectedDetailCampaignId(null);
+      return;
+    }
+
+    if (!selectedDetailCampaignId || !campaigns.some((campaign) => campaign.id === selectedDetailCampaignId)) {
+      setSelectedDetailCampaignId(campaigns[0].id);
+    }
+  }, [campaigns, selectedDetailCampaignId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -500,106 +482,12 @@ export function CampaignsManager({
     [campaigns, statusFilter]
   );
 
-  const campaignMetrics = useMemo(() => {
-    const activeOperations = campaigns.filter((campaign) =>
-      ["RUNNING", "SCHEDULED", "DRAFT", "PAUSED"].includes(campaign.status)
-    ).length;
-    const queueTotal = campaigns.reduce((total, campaign) => total + campaign.stats.PENDING, 0);
-    const reviewRequired = campaigns.filter(
-      (campaign) =>
-        campaign.operationState?.humanReviewNeeded ||
-        campaign.safetySimulation?.requiresHumanReview
-    ).length;
-    const safeDeliveryRate =
-      campaigns.length === 0
-        ? 0
-        : Math.round(
-            campaigns.reduce(
-              (total, campaign) => total + (campaign.operationState?.deliveryRate ?? 0),
-              0
-            ) / campaigns.length
-          );
-    const avgThroughput =
-      campaigns.length === 0
-        ? 0
-        : Math.round(
-            campaigns.reduce(
-              (total, campaign) => total + (campaign.operationState?.activeThroughput ?? 0),
-              0
-            ) / campaigns.length
-          );
-
-    return {
-      activeOperations,
-      queueTotal,
-      reviewRequired,
-      safeDeliveryRate,
-      avgThroughput
-    };
-  }, [campaigns]);
-
   const statusOptions = useMemo(() => {
-    const values = [...new Set(campaigns.map((campaign) => campaign.status))];
-    return ["ALL", ...values];
+    return ["ALL", "RUNNING", "DRAFT", "SCHEDULED", "PAUSED", "COMPLETED"];
   }, [campaigns]);
 
-  const liveEvents = useMemo(() => {
-    return campaigns
-      .flatMap((campaign) => {
-        const state = campaign.operationState;
-        const events = [];
-
-        if (!state) {
-          return [];
-        }
-
-        events.push({
-          id: `${campaign.id}-throughput`,
-          title: "throughput recalculated",
-          detail: `${campaign.name} ${state.activeThroughput}/${state.safeThroughput}`,
-          tone: "bg-cyan-300"
-        });
-
-        if (campaign.stats.PENDING > state.activeThroughput) {
-          events.push({
-            id: `${campaign.id}-batch`,
-            title: "batch delayed",
-            detail: `${campaign.stats.PENDING} contatos aguardando janela operacional`,
-            tone: "bg-slate-300"
-          });
-        }
-
-        if (state.failsafeTriggered) {
-          events.push({
-            id: `${campaign.id}-cooldown`,
-            title: "cooldown applied",
-            detail: `${campaign.name} protegido por failsafe`,
-            tone: "bg-amber-300"
-          });
-        }
-
-        if (state.humanReviewNeeded) {
-          events.push({
-            id: `${campaign.id}-review`,
-            title: "human review required",
-            detail: `${campaign.name} exige aprovacao operacional`,
-            tone: "bg-rose-300"
-          });
-        }
-
-        if (campaign.safetySimulation?.riskLevel === "LOW") {
-          events.push({
-            id: `${campaign.id}-warmup`,
-            title: "warmup upgraded",
-            detail: `${campaign.name} apta para ampliacao gradual`,
-            tone: "bg-emerald-300"
-          });
-        }
-
-        return events;
-      })
-      .slice(0, 10);
-  }, [campaigns]);
+  const selectedDetailCampaign =
+    campaigns.find((campaign) => campaign.id === selectedDetailCampaignId) ?? campaigns[0] ?? null;
 
   function toggleAudienceValue(section: AudienceFilterKey, value: string) {
     setAudience((current) => {
@@ -677,10 +565,8 @@ export function CampaignsManager({
     }
 
     setCampaigns(data.campaigns.map(normalizeCampaign));
-    setLastUpdated(new Date());
-
     if (!silent) {
-      setFeedback("Telemetria operacional atualizada.");
+      setFeedback("Campanhas atualizadas.");
     }
   }
 
@@ -726,6 +612,7 @@ export function CampaignsManager({
       });
       setSelectionFilters(emptySelectionFilters);
       setDraftAudiencePreviewPage(1);
+      setActiveWizardStep(0);
       setFeedback(data.message ?? "Campanha criada.");
       await refreshCampaigns({ silent: true });
     } catch {
@@ -735,7 +622,7 @@ export function CampaignsManager({
     }
   }
 
-  async function triggerAction(campaignId: string, action: "start" | "pause" | "send-next") {
+  async function triggerAction(campaignId: string, action: "start" | "pause" | "cancel" | "send-next") {
     setPending(true);
     setError(null);
     setFeedback(null);
@@ -955,335 +842,25 @@ export function CampaignsManager({
   }
 
   return (
-    <div className="space-y-4">
-      <section className="ops-grid relative overflow-hidden rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,_rgba(3,10,20,0.98)_0%,_rgba(6,17,31,0.98)_100%)] p-5 shadow-[0_28px_90px_rgba(2,6,23,0.34)]">
-        <div className="relative z-10 grid gap-5 xl:grid-cols-[minmax(0,1.18fr)_minmax(330px,0.82fr)]">
-          <div className="space-y-5">
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-200">
-                <span className="signal-dot h-2 w-2 rounded-full bg-cyan-300" />
-                fluxo supervisionado
-              </span>
-              <span className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
-                atualizado {formatTime(lastUpdated)}
-              </span>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <h2 className="text-2xl font-semibold tracking-tight text-white lg:text-[2rem]">
-                  Crie, valide e acompanhe campanhas com clareza operacional.
-                </h2>
-                <p className="mt-3 max-w-4xl text-sm leading-7 text-slate-300">
-                  Uma campanha organiza um envio oficial de WhatsApp a partir de um template aprovado.
-                  Depois do início, os contatos elegíveis entram em uma fila supervisionada, o worker
-                  processa os envios gradualmente, o delay humano preserva a cadência e a timeline mostra
-                  cada etapa da operação.
-                </p>
-              </div>
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-                {ONBOARDING_STEPS.map((step) => (
-                  <article
-                    key={step.title}
-                    className="rounded-[20px] border border-white/8 bg-white/[0.03] px-4 py-4"
-                  >
-                    <p className="text-sm font-semibold text-white">{step.title}</p>
-                    <p className="mt-2 text-sm leading-6 text-slate-400">{step.description}</p>
-                  </article>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-              <TopMetric label="Cadência atual" value={String(campaignMetrics.avgThroughput)} />
-              <TopMetric label="Em fila agora" value={String(campaignMetrics.queueTotal)} />
-              <TopMetric label="Entrega segura" value={`${campaignMetrics.safeDeliveryRate}%`} />
-              <TopMetric label="Campanhas ativas" value={String(campaignMetrics.activeOperations)} />
-              <TopMetric label="Revisão humana" value={String(campaignMetrics.reviewRequired)} />
-            </div>
-
-            <form onSubmit={handleCreate} className="grid gap-4">
-              <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-                <div className="grid gap-3 lg:grid-cols-2">
-                  <div>
-                    <p className="text-sm font-semibold text-white">Criar campanha</p>
-                    <p className="mt-2 text-sm leading-6 text-slate-300">
-                      Escolha um template oficial, selecione os contatos manualmente e configure a
-                      operação. O envio real só começa depois da validação final.
-                    </p>
-                  </div>
-                  <div className="grid gap-2 text-sm text-slate-400">
-                    <p>
-                      <span className="font-medium text-slate-200">Template oficial:</span> mensagem aprovada para envio institucional no WhatsApp.
-                    </p>
-                    <p>
-                      <span className="font-medium text-slate-200">Opt-in:</span> autorização do contato para receber mensagens deste canal.
-                    </p>
-                    <p>
-                      <span className="font-medium text-slate-200">Elegível x bloqueado:</span> elegíveis podem entrar na fila; bloqueados, opt-out e inválidos ficam fora da operação.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
-                <Input
-                  value={form.name}
-                  onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-                  placeholder="Nome da campanha"
-                  className="border-white/10 bg-white/[0.04] text-white placeholder:text-slate-500"
-                />
-                <select
-                  value={form.templateId}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, templateId: event.target.value }))
-                  }
-                  className="h-12 rounded-2xl border border-white/10 bg-white/[0.04] px-4 text-sm text-white outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-400/10"
-                >
-                  <option value="" className="text-slate-950">
-                    Escolha o template oficial
-                  </option>
-                  {templateOptions.map((template) => (
-                    <option key={template.id} value={template.id} className="text-slate-950">
-                      {template.name} • {template.language}
-                    </option>
-                  ))}
-                </select>
-                <Input
-                  type="number"
-                  min={1}
-                  max={200}
-                  value={form.dailyLimit}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, dailyLimit: event.target.value }))
-                  }
-                  placeholder="Limite operacional por dia"
-                  className="border-white/10 bg-white/[0.04] text-white placeholder:text-slate-500"
-                />
-                <Input
-                  type="number"
-                  min={25}
-                  max={3600}
-                  value={form.delaySeconds}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, delaySeconds: event.target.value }))
-                  }
-                  placeholder="Intervalo base entre mensagens"
-                  className="border-white/10 bg-white/[0.04] text-white placeholder:text-slate-500"
-                />
-              </div>
-
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {AUDIENCE_SECTIONS.map((section) => {
-                    const options = audienceOptions[section.key];
-                    const fallback = section.key === "tags" ? availableTags : [];
-                    const values = options.length > 0 ? options : fallback;
-
-                    return (
-                      <div
-                        key={section.key}
-                        className="rounded-[20px] border border-white/8 bg-white/[0.03] p-4"
-                      >
-                        <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
-                          {section.label}
-                        </p>
-                        <p className="mt-2 text-sm leading-6 text-slate-400">
-                          {section.key === "tags"
-                            ? "Use tags para reunir públicos com o mesmo contexto operacional."
-                            : section.key === "groups"
-                              ? "Grupos ajudam a separar bases por frente de atuação ou origem."
-                              : section.key === "priorities"
-                                ? "Prioridade organiza quem deve receber atenção primeiro."
-                                : section.key === "locations"
-                                  ? "Localização restringe o envio por território ou unidade."
-                                  : section.key === "interests"
-                                    ? "Interesses refinam o público conforme tema ou pauta."
-                                    : "Tipo de contato diferencia perfis e canais cadastrados."}
-                        </p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {values.length === 0 ? (
-                            <span className="rounded-full border border-white/8 bg-black/10 px-3 py-1.5 text-xs text-slate-500">
-                              sem dados
-                            </span>
-                          ) : (
-                            values.map((value) => {
-                              const selected = audience[section.key].includes(value);
-
-                              return (
-                                <button
-                                  key={value}
-                                  type="button"
-                                  onClick={() => toggleAudienceValue(section.key, value)}
-                                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-                                    selected
-                                      ? "border-cyan-300 bg-cyan-300 text-slate-950"
-                                      : "border-white/8 bg-white/[0.03] text-slate-300"
-                                  }`}
-                                >
-                                  {value}
-                                </button>
-                              );
-                            })
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="rounded-[20px] border border-cyan-400/15 bg-cyan-400/[0.08] p-4">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-200">
-                    Público elegível
-                  </p>
-                  <p className="mt-3 text-4xl font-semibold text-white">{eligibleCount}</p>
-                  <div className="mt-4 space-y-2 text-sm text-cyan-50/85">
-                    <p>somente contatos com opt-in válido e status ativo podem seguir</p>
-                    <p>a cadência operacional é ajustada automaticamente para proteger o número</p>
-                    <p>o failsafe pausa a operação após {initialSettings.maxConsecutiveFailures} falhas consecutivas</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
-                <Input
-                  type="datetime-local"
-                  value={form.scheduledAt}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, scheduledAt: event.target.value }))
-                  }
-                  className="border-white/10 bg-white/[0.04] text-white placeholder:text-slate-500"
-                />
-                <div className="flex flex-wrap gap-3">
-                  <Button
-                    type="submit"
-                    className="flex-1 gap-2"
-                    disabled={
-                      pending ||
-                      templateOptions.length === 0 ||
-                      (audience.selectedContactIds?.length ?? 0) === 0
-                    }
-                  >
-                    <Megaphone className="h-4 w-4" />
-                    Criar operação
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]"
-                    onClick={runBirthdayTestCampaign}
-                    disabled={pending || templateOptions.length === 0}
-                  >
-                    Executar envio de teste
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]"
-                    onClick={() => refreshCampaigns()}
-                    disabled={pending}
-                  >
-                    Atualizar
-                  </Button>
-                </div>
-              </div>
-            </form>
-
-            {(error || feedback) && (
-              <div className="grid gap-2">
-                {error ? <p className="text-sm text-rose-300">{error}</p> : null}
-                {feedback ? <p className="text-sm text-emerald-300">{feedback}</p> : null}
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-[24px] border border-white/10 bg-[#040b16]/90 p-4">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-                  Operação em tempo real
-                </p>
-                <p className="mt-1 text-sm text-slate-300">fila, cadência, proteção, revisão e eventos de envio</p>
-              </div>
-              <RefreshCw className="h-4 w-4 text-cyan-300" />
-            </div>
-            <div className="mt-3 space-y-2">
-              {liveEvents.length === 0 ? (
-                <div className="rounded-[18px] border border-white/8 bg-white/[0.03] px-4 py-4 text-sm text-slate-400">
-                  Nenhuma campanha em execução no momento.
-                </div>
-              ) : (
-                liveEvents.map((event) => (
-                  <article
-                    key={event.id}
-                    className="rounded-[18px] border border-white/8 bg-white/[0.03] px-3 py-3"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`h-2.5 w-2.5 rounded-full ${event.tone}`} />
-                      <p className="text-sm font-medium text-white">{event.title}</p>
-                    </div>
-                    <p className="mt-1 text-xs text-slate-400">{event.detail}</p>
-                  </article>
-                ))
-              )}
-            </div>
-          </div>
+    <div className="space-y-6">
+      {(error || feedback) && (
+        <div
+          className={cn(
+            "rounded-2xl border px-4 py-3 text-sm",
+            error
+              ? "border-rose-200 bg-rose-50 text-rose-700"
+              : "border-emerald-200 bg-emerald-50 text-emerald-700"
+          )}
+        >
+          {error ?? feedback}
         </div>
-      </section>
+      )}
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
-        <article className="rounded-[28px] border border-white/10 bg-[#07111e] p-5">
-          <div className="border-b border-white/10 pb-4">
-            <p className="text-sm font-semibold text-white">Como funciona o envio</p>
-            <p className="mt-1 text-sm text-slate-400">
-              Entenda o que acontece entre a validação e o acompanhamento da campanha.
-            </p>
-          </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {HOW_DELIVERY_WORKS.map((item, index) => (
-              <article
-                key={item}
-                className="rounded-[20px] border border-white/8 bg-white/[0.03] px-4 py-4"
-              >
-                <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-200">
-                  Etapa {index + 1}
-                </p>
-                <p className="mt-2 text-sm leading-6 text-slate-300">{item}</p>
-              </article>
-            ))}
-          </div>
-        </article>
-
-        <article className="rounded-[28px] border border-white/10 bg-[#07111e] p-5">
-          <div className="border-b border-white/10 pb-4">
-            <p className="text-sm font-semibold text-white">Primeira campanha</p>
-            <p className="mt-1 text-sm text-slate-400">
-              Sequência recomendada para o primeiro envio operacional.
-            </p>
-          </div>
-          <div className="mt-4 space-y-3">
-            {FIRST_CAMPAIGN_STEPS.map((item, index) => (
-              <div
-                key={item}
-                className="flex gap-3 rounded-[18px] border border-white/8 bg-white/[0.03] px-4 py-4"
-              >
-                <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-cyan-400/20 bg-cyan-400/10 text-xs font-semibold text-cyan-100">
-                  {index + 1}
-                </span>
-                <p className="text-sm leading-6 text-slate-300">{item}</p>
-              </div>
-            ))}
-          </div>
-        </article>
-      </section>
-
-      <section className="rounded-[28px] border border-white/10 bg-[#07111e] p-5">
-        <div className="flex flex-col gap-3 border-b border-white/10 pb-4 lg:flex-row lg:items-center lg:justify-between">
+      <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-soft ring-1 ring-white/70">
+        <div className="flex flex-col gap-4 border-b border-slate-100 pb-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <p className="text-sm font-semibold text-white">Campanhas em operação</p>
-            <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-500">
-              estado atual, fila, entrega, cadência, risco e ações disponíveis
-            </p>
+            <h2 className="text-lg font-semibold tracking-tight text-slate-950">Campanhas</h2>
+            <p className="mt-1 text-sm text-slate-500">Status, público, entrega e ações principais.</p>
           </div>
           <div className="flex flex-wrap gap-2">
             {statusOptions.map((status) => (
@@ -1291,133 +868,122 @@ export function CampaignsManager({
                 key={status}
                 type="button"
                 onClick={() => setStatusFilter(status)}
-                className={`rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] transition ${
+                className={cn(
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
                   statusFilter === status
-                    ? "border-cyan-300 bg-cyan-300 text-slate-950"
-                    : "border-white/8 bg-white/[0.03] text-slate-400"
-                }`}
+                    ? "border-slate-950 bg-slate-950 text-white"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                )}
               >
-                {status === "ALL" ? "Todas" : status}
+                {status === "ALL" ? "Todas" : getStatusLabel(status)}
               </button>
             ))}
+            <Button type="button" variant="secondary" className="h-9 rounded-full px-3" onClick={() => refreshCampaigns()} disabled={pending}>
+              <RefreshCw className="h-4 w-4" />
+              Atualizar
+            </Button>
           </div>
         </div>
 
         {visibleCampaigns.length === 0 ? (
-          <div className="py-10 text-center text-sm text-slate-500">
-            Nenhuma campanha no filtro atual.
-          </div>
+          <div className="py-10 text-center text-sm text-slate-500">Nenhuma campanha no filtro atual.</div>
         ) : (
           <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full border-separate border-spacing-y-2 text-sm">
+            <table className="min-w-full text-sm">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-[0.18em] text-slate-500">
-                  <th className="px-3 py-2 font-medium">Campanha</th>
-                  <th className="px-3 py-2 font-medium">Estado</th>
-                  <th className="px-3 py-2 font-medium">Fila</th>
-                  <th className="px-3 py-2 font-medium">Entrega</th>
-                  <th className="px-3 py-2 font-medium">Cadência</th>
-                  <th className="px-3 py-2 font-medium">Delay humano</th>
-                  <th className="px-3 py-2 font-medium">Risco</th>
+                <tr className="border-b border-slate-100 text-left text-xs font-semibold text-slate-500">
+                  <th className="px-3 py-3">Campanha</th>
+                  <th className="px-3 py-3">Status</th>
+                  <th className="px-3 py-3">Público</th>
+                  <th className="px-3 py-3">Enviadas</th>
+                  <th className="px-3 py-3">Falhas</th>
+                  <th className="px-3 py-3">Entrega</th>
+                  <th className="px-3 py-3">Criada em</th>
                   <th className="px-3 py-2 font-medium">Ações</th>
                 </tr>
               </thead>
               <tbody>
                 {visibleCampaigns.map((campaign) => {
                   const audienceSummary = getAudienceSummary(campaign);
+                  const deliveryRate = getDeliveryRate(campaign);
 
                   return (
-                    <tr key={campaign.id} className="align-top">
-                      <td className="rounded-l-2xl border-y border-l border-white/8 bg-white/[0.03] px-3 py-3">
-                        <p className="font-medium text-white">{campaign.name}</p>
+                    <tr
+                      key={campaign.id}
+                      className={cn(
+                        "border-b border-slate-100 align-middle transition hover:bg-slate-50/80",
+                        selectedDetailCampaign?.id === campaign.id && "bg-slate-50"
+                      )}
+                    >
+                      <td className="px-3 py-4">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedDetailCampaignId(campaign.id)}
+                          className="text-left"
+                        >
+                          <span className="font-semibold text-slate-950">{campaign.name}</span>
+                        </button>
                         <p className="mt-1 text-xs text-slate-500">
                           {campaign.template.name} • {campaign.template.language}
                         </p>
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {audienceSummary.length === 0 ? (
-                            <span className="rounded-full border border-white/8 px-2 py-1 text-[11px] text-slate-500">
-                              todos os elegíveis
-                            </span>
-                          ) : (
-                            audienceSummary.slice(0, 4).map((tag) => (
-                              <span
-                                key={tag}
-                                className="rounded-full border border-white/8 px-2 py-1 text-[11px] text-slate-400"
-                              >
-                                {tag}
-                              </span>
-                            ))
-                          )}
-                        </div>
                       </td>
-                      <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3">
-                        <StatePill label={campaign.operationState?.pipelineStage ?? campaign.status} />
-                        <p className="mt-2 text-xs text-slate-500">
-                          {formatDateTime(campaign.updatedAt)}
+                      <td className="px-3 py-4">
+                        <StatusBadge status={campaign.status} />
+                      </td>
+                      <td className="px-3 py-4 text-slate-700">
+                        <span>{campaign.stats.total || campaign.sentCount + campaign.failedCount}</span>
+                        <p className="mt-1 max-w-[220px] truncate text-xs text-slate-500">
+                          {audienceSummary.length > 0 ? audienceSummary.slice(0, 3).join(", ") : "Todos os elegíveis"}
                         </p>
                       </td>
-                      <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3 text-slate-300">
-                        <p>{campaign.stats.PENDING} aguardando processamento</p>
-                        <p className="mt-1 text-xs text-slate-500">
-                          {campaign.stats.SENT} enviados • {campaign.stats.FAILED} falhas
-                        </p>
+                      <td className="px-3 py-4 font-medium text-slate-950">
+                        {campaign.stats.SENT || campaign.sentCount}
                       </td>
-                      <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3">
-                        <DataCell
-                          label="taxa de entrega segura"
-                          value={`${campaign.operationState?.deliveryRate ?? 0}%`}
-                        />
+                      <td className="px-3 py-4 text-slate-700">
+                        {campaign.stats.FAILED || campaign.failedCount}
                       </td>
-                      <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3">
-                        <DataCell
-                          label="mensagens por janela"
-                          value={`${campaign.operationState?.activeThroughput ?? 0}/${campaign.operationState?.safeThroughput ?? 0}`}
-                        />
-                      </td>
-                      <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3">
-                        <DataCell
-                          label="intervalo aplicado"
-                          value={`${campaign.operationState?.currentDelayMin ?? 0}s-${campaign.operationState?.currentDelayMax ?? campaign.delaySeconds}s`}
-                        />
-                      </td>
-                      <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3">
-                        <RiskBadge value={campaign.operationState?.riskScore ?? 0} />
-                        {campaign.operationState?.recommendedAction ? (
-                          <p className="mt-2 max-w-[220px] text-xs leading-5 text-slate-500">
-                            {campaign.operationState.recommendedAction}
-                          </p>
-                        ) : null}
-                      </td>
-                      <td className="rounded-r-2xl border-y border-r border-white/8 bg-white/[0.03] px-3 py-3">
-                        <div className="grid gap-2">
-                  <Button
-                    type="button"
-                    className="justify-start gap-2"
-                            onClick={() => openPreflight(campaign.id, campaign.name, campaign.template.name)}
+                      <td className="px-3 py-4 text-slate-700">{deliveryRate}%</td>
+                      <td className="px-3 py-4 text-slate-500">{formatDateTime(campaign.createdAt)}</td>
+                      <td className="px-3 py-4">
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="h-9 rounded-xl px-3"
+                            onClick={() => setSelectedDetailCampaignId(campaign.id)}
                             disabled={pending}
                           >
+                            <Eye className="h-4 w-4" />
+                            Ver
+                          </Button>
+                          <Button
+                            type="button"
+                            className="h-9 rounded-xl px-3"
+                            onClick={() => openPreflight(campaign.id, campaign.name, campaign.template.name)}
+                            disabled={pending || ["RUNNING", "COMPLETED", "CANCELLED"].includes(campaign.status)}
+                          >
                             <Play className="h-4 w-4" />
-                            Revisar envio
+                            Iniciar
                           </Button>
                           <Button
                             type="button"
                             variant="secondary"
-                            className="justify-start gap-2 border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]"
-                            onClick={() => triggerAction(campaign.id, "send-next")}
+                            className="h-9 rounded-xl px-3"
+                            onClick={() => triggerAction(campaign.id, "pause")}
                             disabled={pending || campaign.status !== "RUNNING"}
                           >
-                            <RefreshCw className="h-4 w-4" />
-                            Acompanhar operação
+                            <Pause className="h-4 w-4" />
+                            Pausar
                           </Button>
                           <Button
                             type="button"
                             variant="danger"
-                            className="justify-start gap-2"
-                            onClick={() => triggerAction(campaign.id, "pause")}
-                            disabled={pending}
+                            className="h-9 rounded-xl px-3"
+                            onClick={() => triggerAction(campaign.id, "cancel")}
+                            disabled={pending || ["COMPLETED", "CANCELLED"].includes(campaign.status)}
                           >
-                            <Pause className="h-4 w-4" />
-                            Pausar operação
+                            <XCircle className="h-4 w-4" />
+                            Cancelar
                           </Button>
                         </div>
                       </td>
@@ -1430,272 +996,280 @@ export function CampaignsManager({
         )}
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(340px,0.75fr)]">
-        <article className="rounded-[28px] border border-white/10 bg-[#07111e] p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
+      {selectedDetailCampaign ? (
+        <CampaignDetail
+          campaign={selectedDetailCampaign}
+          activeTab={detailTab}
+          onTabChange={setDetailTab}
+        />
+      ) : null}
+
+      <section id="nova-campanha" className="rounded-3xl border border-slate-200 bg-white p-5 shadow-soft ring-1 ring-white/70">
+        <form onSubmit={handleCreate} className="space-y-6">
+          <div className="flex flex-col gap-4 border-b border-slate-100 pb-5 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <p className="text-sm font-semibold text-white">Selecionar destinatários</p>
-              <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-500">
-                busca, filtros, elegibilidade e preview individual
-              </p>
-              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-                Use os filtros para montar a audiência manualmente. O preview mostra quem está
-                elegível, quem será bloqueado e como a mensagem será renderizada para cada contato.
-              </p>
+              <h2 className="text-lg font-semibold tracking-tight text-slate-950">Nova Campanha</h2>
+              <p className="mt-1 text-sm text-slate-500">Wizard em 4 etapas para criar e revisar o envio.</p>
             </div>
-            <div className="flex flex-wrap gap-2 text-xs text-slate-400">
-              <span>Selecionados {audience.selectedContactIds?.length ?? 0}</span>
-              <span>Elegíveis {draftAudiencePreview?.totalElegiveis ?? 0}</span>
-              <span>Bloqueados {(draftAudiencePreview?.totalBloqueados ?? 0) + (draftAudiencePreview?.totalInvalidos ?? 0)}</span>
-            </div>
-          </div>
-
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
-            <Input
-              value={selectionFilters.query}
-              onChange={(event) => updateSelectionFilter("query", event.target.value)}
-              placeholder="Buscar nome, telefone ou código"
-              className="border-white/10 bg-white/[0.04] text-white placeholder:text-slate-500 xl:col-span-2"
-            />
-            <select
-              value={selectionFilters.optInFilter}
-              onChange={(event) => updateSelectionFilter("optInFilter", event.target.value as SelectionFilters["optInFilter"])}
-              className="h-12 rounded-2xl border border-white/10 bg-white/[0.04] px-4 text-sm text-white outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-400/10"
-            >
-              <option value="ALL" className="text-slate-950">Opt-in: todos</option>
-              <option value="OPT_IN" className="text-slate-950">Opt-in</option>
-              <option value="SEM_OPT_IN" className="text-slate-950">Sem opt-in</option>
-              <option value="OPT_OUT" className="text-slate-950">Opt-out</option>
-            </select>
-            <select
-              value={selectionFilters.contactStatus}
-              onChange={(event) => updateSelectionFilter("contactStatus", event.target.value as SelectionFilters["contactStatus"])}
-              className="h-12 rounded-2xl border border-white/10 bg-white/[0.04] px-4 text-sm text-white outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-400/10"
-            >
-              <option value="ALL" className="text-slate-950">Status: todos</option>
-              <option value="ACTIVE" className="text-slate-950">Ativos</option>
-              <option value="UNSUBSCRIBED" className="text-slate-950">Opt-out</option>
-              <option value="BLOCKED" className="text-slate-950">Bloqueados</option>
-              <option value="INVALID" className="text-slate-950">Sem telefone</option>
-            </select>
-            <select
-              value={selectionFilters.birthdayFilter}
-              onChange={(event) => updateSelectionFilter("birthdayFilter", event.target.value as SelectionFilters["birthdayFilter"])}
-              className="h-12 rounded-2xl border border-white/10 bg-white/[0.04] px-4 text-sm text-white outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-400/10"
-            >
-              <option value="ALL" className="text-slate-950">Aniversário: todos</option>
-              <option value="WITH_BIRTHDAY" className="text-slate-950">Com aniversário</option>
-              <option value="TODAY" className="text-slate-950">Aniversário hoje</option>
-            </select>
-            <div className="grid grid-cols-2 gap-2">
-              <select
-                value={selectionFilters.sortBy}
-                onChange={(event) => updateSelectionFilter("sortBy", event.target.value as SelectionFilters["sortBy"])}
-                className="h-12 rounded-2xl border border-white/10 bg-white/[0.04] px-4 text-sm text-white outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-400/10"
-              >
-                <option value="name" className="text-slate-950">Nome</option>
-                <option value="code" className="text-slate-950">Código</option>
-                <option value="importedAt" className="text-slate-950">Importação</option>
-              </select>
-              <select
-                value={selectionFilters.sortOrder}
-                onChange={(event) => updateSelectionFilter("sortOrder", event.target.value as SelectionFilters["sortOrder"])}
-                className="h-12 rounded-2xl border border-white/10 bg-white/[0.04] px-4 text-sm text-white outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-400/10"
-              >
-                <option value="asc" className="text-slate-950">Asc</option>
-                <option value="desc" className="text-slate-950">Desc</option>
-              </select>
+            <div className="flex flex-wrap gap-2">
+              {WIZARD_STEPS.map((step, index) => (
+                <button
+                  key={step}
+                  type="button"
+                  onClick={() => setActiveWizardStep(index)}
+                  className={cn(
+                    "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
+                    activeWizardStep === index
+                      ? "border-brand-600 bg-brand-600 text-white"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                  )}
+                >
+                  {index + 1}. {step}
+                </button>
+              ))}
             </div>
           </div>
 
-          <div className="mt-4 flex flex-wrap gap-3">
-            <Button
-              type="button"
-              variant="secondary"
-              className="border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]"
-              onClick={selectDraftPageRecipients}
-              disabled={draftAudiencePreviewLoading || !draftAudiencePreview || draftAudiencePreview.recipients.length === 0}
-            >
-              Selecionar desta página
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              className="border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]"
-              onClick={clearSelectedRecipients}
-              disabled={(audience.selectedContactIds?.length ?? 0) === 0}
-            >
-              Limpar seleção
-            </Button>
-          </div>
-
-          <div className="rounded-[18px] border border-cyan-400/15 bg-cyan-400/[0.08] px-4 py-3 text-sm text-cyan-50/85">
-            Destinatários selecionados manualmente não dependem dos filtros da campanha.
-          </div>
-
-          {draftAudiencePreviewLoading ? (
-            <div className="py-8 text-sm text-slate-400">Carregando audiência prevista...</div>
-          ) : !form.templateId ? (
-            <div className="py-8 text-sm text-slate-400">Selecione um template oficial para liberar o preview individual.</div>
-          ) : !draftAudiencePreview || draftAudiencePreview.recipients.length === 0 ? (
-            <div className="py-8 text-sm text-slate-400">Nenhum contato encontrado no filtro atual.</div>
-          ) : (
-            <div className="mt-4 overflow-x-auto">
-              <table className="min-w-full border-separate border-spacing-y-2 text-sm">
-                <thead>
-                  <tr className="text-left text-[11px] uppercase tracking-[0.18em] text-slate-500">
-                    <th className="px-3 py-2 font-medium">Sel.</th>
-                    <th className="px-3 py-2 font-medium">Nome</th>
-                    <th className="px-3 py-2 font-medium">Telefone</th>
-                    <th className="px-3 py-2 font-medium">Código</th>
-                    <th className="px-3 py-2 font-medium">Tags</th>
-                    <th className="px-3 py-2 font-medium">Situação</th>
-                    <th className="px-3 py-2 font-medium">Preview individual</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {draftAudiencePreview.recipients.map((recipient) => {
-                    const selected = audience.selectedContactIds?.includes(recipient.contactId) ?? false;
-
-                    return (
-                      <tr key={recipient.contactId} className="align-top">
-                        <td className="rounded-l-2xl border-y border-l border-white/8 bg-white/[0.03] px-3 py-3">
-                          <input
-                            type="checkbox"
-                            checked={selected}
-                            onChange={() => toggleRecipientSelection(recipient.contactId)}
-                            className="h-4 w-4 rounded border-white/20 bg-slate-950"
-                          />
-                        </td>
-                        <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3 text-white">
-                          <p>{recipient.name}</p>
-                          <p className="mt-1 text-xs text-slate-500">
-                            {formatDateTime(recipient.importedAt)}
-                          </p>
-                        </td>
-                        <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3 text-slate-300">
-                          {recipient.phone || "—"}
-                        </td>
-                        <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3 font-mono text-xs tracking-[0.18em] text-slate-300">
-                          {recipient.code}
-                        </td>
-                        <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3 text-slate-300">
-                          {recipient.tags.join(", ") || "—"}
-                        </td>
-                        <td className="border-y border-white/8 bg-white/[0.03] px-3 py-3">
-                          <SelectionStateBadge state={recipient.selectionState} />
-                        </td>
-                        <td className="rounded-r-2xl border-y border-r border-white/8 bg-white/[0.03] px-3 py-3 text-slate-300">
-                          {recipient.renderedPreview}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
-                <span>
-                  Página {draftAudiencePreview.page} de {draftAudiencePreview.totalPages}
-                </span>
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]"
-                    onClick={() => setDraftAudiencePreviewPage((current) => Math.max(1, current - 1))}
-                    disabled={draftAudiencePreviewPage <= 1}
-                  >
-                    Anterior
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]"
-                    onClick={() =>
-                      setDraftAudiencePreviewPage((current) =>
-                        Math.min(draftAudiencePreview.totalPages, current + 1)
-                      )
-                    }
-                    disabled={draftAudiencePreviewPage >= draftAudiencePreview.totalPages}
-                  >
-                    Próxima
-                  </Button>
-                </div>
+          {activeWizardStep === 0 ? (
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Field label="Nome da campanha">
+                <Input
+                  value={form.name}
+                  onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder="Ex: Prestação de contas - Junho"
+                />
+              </Field>
+              <Field label="Template">
+                <select
+                  value={form.templateId}
+                  onChange={(event) => setForm((current) => ({ ...current, templateId: event.target.value }))}
+                  className="h-12 w-full rounded-2xl border border-line bg-white px-4 text-sm text-ink outline-none focus:border-brand-400 focus:ring-4 focus:ring-brand-100"
+                >
+                  <option value="">Selecione um template</option>
+                  {templateOptions.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name} - {template.language}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Data de envio">
+                <Input
+                  type="datetime-local"
+                  value={form.scheduledAt}
+                  onChange={(event) => setForm((current) => ({ ...current, scheduledAt: event.target.value }))}
+                />
+              </Field>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Limite diário">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={form.dailyLimit}
+                    onChange={(event) => setForm((current) => ({ ...current, dailyLimit: event.target.value }))}
+                  />
+                </Field>
+                <Field label="Intervalo">
+                  <Input
+                    type="number"
+                    min={25}
+                    max={3600}
+                    value={form.delaySeconds}
+                    onChange={(event) => setForm((current) => ({ ...current, delaySeconds: event.target.value }))}
+                  />
+                </Field>
               </div>
             </div>
-          )}
-        </article>
+          ) : null}
 
-        <article className="rounded-[28px] border border-white/10 bg-[#07111e] p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
-            <div>
-              <p className="text-sm font-semibold text-white">Destinatários selecionados</p>
-              <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-500">
-                revisão final antes de criar a operação
-              </p>
-              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-                Revise a audiência final antes de validar a operação. Aqui você confirma quem
-                realmente seguirá para a etapa de confirmação de envio.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2 text-xs text-slate-400">
-              <span>Total {selectedAudiencePreview?.totalSelecionados ?? audience.selectedContactIds?.length ?? 0}</span>
-              <span>Encontrados {selectedAudiencePreview?.totalEncontrados ?? 0}</span>
-              <span>Elegíveis {selectedAudiencePreview?.totalElegiveis ?? 0}</span>
-              <span>Telefone inválido {selectedAudiencePreview?.totalInvalidos ?? 0}</span>
-              <span>Opt-out {selectedAudiencePreview?.totalOptOut ?? 0}</span>
-              <span>Enfileirados {selectedAudiencePreview?.totalJaConfirmados ?? 0}</span>
-            </div>
-          </div>
+          {activeWizardStep === 1 ? (
+            <div className="space-y-5">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {AUDIENCE_SECTIONS.map((section) => {
+                  const options = audienceOptions[section.key];
+                  const fallback = section.key === "tags" ? availableTags : [];
+                  const values = options.length > 0 ? options : fallback;
 
-          {selectedAudiencePreviewLoading ? (
-            <div className="py-8 text-sm text-slate-400">Carregando destinatários selecionados...</div>
-          ) : (audience.selectedContactIds?.length ?? 0) === 0 ? (
-            <div className="py-8 text-sm text-slate-400">Nenhum destinatário selecionado.</div>
-          ) : !selectedAudiencePreview ? (
-            <div className="py-8 text-sm text-slate-400">Selecione um template para gerar o preview individual.</div>
-          ) : (
-            <div className="mt-4 space-y-3">
-              <div className="max-h-[520px] space-y-3 overflow-auto pr-1">
-                {selectedAudiencePreview.recipients.map((recipient) => (
-                  <article
-                    key={recipient.contactId}
-                    className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="font-medium text-white">{recipient.name}</p>
-                        <p className="mt-1 text-xs text-slate-500">
-                          {recipient.phone || "—"} • {recipient.code}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <SelectionStateBadge state={recipient.selectionState} />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          className="text-slate-300 hover:bg-white/5 hover:text-white"
-                          onClick={() => toggleRecipientSelection(recipient.contactId)}
-                        >
-                          Remover
-                        </Button>
+                  return (
+                    <div key={section.key} className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
+                      <p className="text-sm font-semibold text-slate-950">{section.label}</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {values.length === 0 ? (
+                          <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500">
+                            Sem dados
+                          </span>
+                        ) : (
+                          values.map((value) => {
+                            const selected = audience[section.key].includes(value);
+
+                            return (
+                              <button
+                                key={value}
+                                type="button"
+                                onClick={() => toggleAudienceValue(section.key, value)}
+                                className={cn(
+                                  "rounded-full border px-3 py-1.5 text-xs font-medium transition",
+                                  selected
+                                    ? "border-brand-600 bg-brand-600 text-white"
+                                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                                )}
+                              >
+                                {value}
+                              </button>
+                            );
+                          })
+                        )}
                       </div>
                     </div>
-                    <p className="mt-3 text-xs uppercase tracking-[0.18em] text-slate-500">
-                      Preview individual
-                    </p>
-                    <p className="mt-2 text-sm leading-6 text-slate-300">
-                      {recipient.renderedPreview}
-                    </p>
-                  </article>
-                ))}
+                  );
+                })}
               </div>
-              <p className="text-xs text-slate-500">
-                Destinatários selecionados manualmente não dependem dos filtros da campanha; apenas telefone válido, opt-out e bloqueio explícito podem impedir a fila.
-              </p>
+
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                  <div className="relative xl:col-span-2">
+                    <Search className="pointer-events-none absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
+                    <Input
+                      value={selectionFilters.query}
+                      onChange={(event) => updateSelectionFilter("query", event.target.value)}
+                      placeholder="Buscar contato"
+                      className="pl-9"
+                    />
+                  </div>
+                  <select
+                    value={selectionFilters.optInFilter}
+                    onChange={(event) => updateSelectionFilter("optInFilter", event.target.value as SelectionFilters["optInFilter"])}
+                    className="h-12 rounded-2xl border border-line bg-white px-4 text-sm text-ink outline-none"
+                  >
+                    <option value="ALL">Opt-in: todos</option>
+                    <option value="OPT_IN">Opt-in</option>
+                    <option value="SEM_OPT_IN">Sem opt-in</option>
+                    <option value="OPT_OUT">Opt-out</option>
+                  </select>
+                  <select
+                    value={selectionFilters.contactStatus}
+                    onChange={(event) => updateSelectionFilter("contactStatus", event.target.value as SelectionFilters["contactStatus"])}
+                    className="h-12 rounded-2xl border border-line bg-white px-4 text-sm text-ink outline-none"
+                  >
+                    <option value="ALL">Status: todos</option>
+                    <option value="ACTIVE">Ativos</option>
+                    <option value="UNSUBSCRIBED">Opt-out</option>
+                    <option value="BLOCKED">Bloqueados</option>
+                    <option value="INVALID">Sem telefone</option>
+                  </select>
+                  <select
+                    value={selectionFilters.birthdayFilter}
+                    onChange={(event) => updateSelectionFilter("birthdayFilter", event.target.value as SelectionFilters["birthdayFilter"])}
+                    className="h-12 rounded-2xl border border-line bg-white px-4 text-sm text-ink outline-none"
+                  >
+                    <option value="ALL">Aniversário: todos</option>
+                    <option value="WITH_BIRTHDAY">Com aniversário</option>
+                    <option value="TODAY">Aniversário hoje</option>
+                  </select>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="h-12 flex-1"
+                      onClick={selectDraftPageRecipients}
+                      disabled={draftAudiencePreviewLoading || !draftAudiencePreview || draftAudiencePreview.recipients.length === 0}
+                    >
+                      Selecionar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-12"
+                      onClick={clearSelectedRecipients}
+                      disabled={(audience.selectedContactIds?.length ?? 0) === 0}
+                    >
+                      Limpar
+                    </Button>
+                  </div>
+                </div>
+
+                <AudiencePreviewTable
+                  loading={draftAudiencePreviewLoading}
+                  templateSelected={Boolean(form.templateId)}
+                  preview={draftAudiencePreview}
+                  selectedIds={audience.selectedContactIds ?? []}
+                  onToggle={toggleRecipientSelection}
+                  page={draftAudiencePreviewPage}
+                  onPageChange={setDraftAudiencePreviewPage}
+                />
+              </div>
             </div>
-          )}
-        </article>
+          ) : null}
+
+          {activeWizardStep === 2 ? (
+            <div className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
+                <p className="text-sm font-semibold text-slate-950">Resumo</p>
+                <div className="mt-4 grid gap-3 text-sm">
+                  <ReviewLine label="Template" value={templateOptions.find((item) => item.id === form.templateId)?.name ?? "Não selecionado"} />
+                  <ReviewLine label="Selecionados" value={String(audience.selectedContactIds?.length ?? 0)} />
+                  <ReviewLine label="Elegíveis" value={String(selectedAudiencePreview?.totalElegiveis ?? 0)} />
+                  <ReviewLine label="Data" value={form.scheduledAt ? formatDateTime(form.scheduledAt) : "Envio manual"} />
+                </div>
+              </div>
+              <SelectedAudienceList
+                loading={selectedAudiencePreviewLoading}
+                preview={selectedAudiencePreview}
+                selectedCount={audience.selectedContactIds?.length ?? 0}
+                onRemove={toggleRecipientSelection}
+              />
+            </div>
+          ) : null}
+
+          {activeWizardStep === 3 ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-5">
+              <div className="grid gap-4 md:grid-cols-4">
+                <SummaryMetric label="Template" value={templateOptions.find((item) => item.id === form.templateId)?.name ?? "-"} />
+                <SummaryMetric label="Audiência" value={`${audience.selectedContactIds?.length ?? 0} contatos`} />
+                <SummaryMetric label="Elegíveis" value={String(selectedAudiencePreview?.totalElegiveis ?? 0)} />
+                <SummaryMetric label="Modo" value={deliveryMode} />
+              </div>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <Button
+                  type="submit"
+                  className="gap-2"
+                  disabled={pending || templateOptions.length === 0 || (audience.selectedContactIds?.length ?? 0) === 0}
+                >
+                  <Send className="h-4 w-4" />
+                  Criar campanha
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={runBirthdayTestCampaign}
+                  disabled={pending || templateOptions.length === 0}
+                >
+                  Envio de teste
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="flex items-center justify-between border-t border-slate-100 pt-5">
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={activeWizardStep === 0}
+              onClick={() => setActiveWizardStep((step) => Math.max(0, step - 1))}
+            >
+              Voltar
+            </Button>
+            {activeWizardStep < WIZARD_STEPS.length - 1 ? (
+              <Button
+                type="button"
+                onClick={() => setActiveWizardStep((step) => Math.min(WIZARD_STEPS.length - 1, step + 1))}
+              >
+                Continuar
+              </Button>
+            ) : null}
+          </div>
+        </form>
       </section>
 
       <PreflightCheckModal
@@ -1762,35 +1336,40 @@ function formatDateTime(value: string) {
   }).format(new Date(value));
 }
 
-function formatTime(value: Date) {
-  return new Intl.DateTimeFormat("pt-BR", {
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(value);
+function getDeliveryRate(campaign: CampaignItem) {
+  const sent = campaign.stats.SENT || campaign.sentCount;
+  const failed = campaign.stats.FAILED || campaign.failedCount;
+  const total = sent + failed;
+
+  return total > 0 ? Math.round((sent / total) * 100) : 0;
 }
 
-function TopMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <article className="rounded-[20px] border border-white/8 bg-white/[0.03] px-4 py-4">
-      <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{label}</p>
-      <p className="mt-2 text-xl font-semibold text-white">{value}</p>
-    </article>
-  );
+function getStatusLabel(status: string) {
+  const map: Record<string, string> = {
+    DRAFT: "Em revisão",
+    RUNNING: "Ativa",
+    SCHEDULED: "Agendada",
+    PAUSED: "Pausada",
+    COMPLETED: "Concluída",
+    FAILED: "Pausada",
+    CANCELLED: "Pausada"
+  };
+
+  return map[status] ?? status;
 }
 
-function StatePill({ label }: { label: string }) {
-  const normalized = label.toLowerCase();
-  const tone =
-    normalized.includes("risk")
-      ? "border-rose-400/20 bg-rose-400/10 text-rose-100"
-      : normalized.includes("paused") || normalized.includes("throttled")
-        ? "border-amber-400/20 bg-amber-400/10 text-amber-100"
-        : normalized.includes("sending") || normalized.includes("running")
-          ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-100"
-          : "border-cyan-400/20 bg-cyan-400/10 text-cyan-100";
+function StatusBadge({ status }: { status: string }) {
+  const label = getStatusLabel(status);
+  const tone = {
+    Ativa: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    "Em revisão": "border-amber-200 bg-amber-50 text-amber-700",
+    Agendada: "border-blue-200 bg-blue-50 text-blue-700",
+    Pausada: "border-rose-200 bg-rose-50 text-rose-700",
+    Concluída: "border-slate-200 bg-slate-100 text-slate-700"
+  }[label] ?? "border-slate-200 bg-slate-100 text-slate-700";
 
   return (
-    <span className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${tone}`}>
+    <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold", tone)}>
       {label}
     </span>
   );
@@ -1800,33 +1379,33 @@ function SelectionStateBadge({ state }: { state: string }) {
   const map: Record<string, { label: string; className: string }> = {
     ELEGIVEL: {
       label: "Elegível",
-      className: "border-emerald-400/20 bg-emerald-400/10 text-emerald-200"
+      className: "border-emerald-200 bg-emerald-50 text-emerald-700"
     },
     BLOQUEADO: {
       label: "Bloqueado",
-      className: "border-rose-400/20 bg-rose-400/10 text-rose-200"
+      className: "border-rose-200 bg-rose-50 text-rose-700"
     },
     SEM_OPT_IN: {
       label: "Sem opt-in",
-      className: "border-amber-400/20 bg-amber-400/10 text-amber-200"
+      className: "border-amber-200 bg-amber-50 text-amber-700"
     },
     SEM_TELEFONE: {
       label: "Sem telefone",
-      className: "border-slate-400/20 bg-slate-400/10 text-slate-200"
+      className: "border-slate-200 bg-slate-100 text-slate-700"
     },
     OPT_OUT: {
       label: "Opt-out",
-      className: "border-fuchsia-400/20 bg-fuchsia-400/10 text-fuchsia-200"
+      className: "border-rose-200 bg-rose-50 text-rose-700"
     },
     JA_ENFILEIRADO: {
       label: "Já enfileirado",
-      className: "border-cyan-400/20 bg-cyan-400/10 text-cyan-200"
+      className: "border-blue-200 bg-blue-50 text-blue-700"
     }
   };
 
   const resolved = map[state] ?? {
     label: state,
-    className: "border-white/10 bg-white/[0.04] text-white"
+    className: "border-slate-200 bg-slate-100 text-slate-700"
   };
 
   return (
@@ -1836,27 +1415,270 @@ function SelectionStateBadge({ state }: { state: string }) {
   );
 }
 
-function DataCell({ label, value }: { label: string; value: string }) {
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{label}</p>
-      <p className="mt-1 text-sm font-medium text-white">{value}</p>
+      <label className="mb-2 block text-sm font-medium text-slate-700">{label}</label>
+      {children}
     </div>
   );
 }
 
-function RiskBadge({ value }: { value: number }) {
-  const tone =
-    value >= 75
-      ? "border-rose-400/20 bg-rose-400/10 text-rose-100"
-      : value >= 55
-        ? "border-amber-400/20 bg-amber-400/10 text-amber-100"
-        : "border-emerald-400/20 bg-emerald-400/10 text-emerald-100";
+function SummaryMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <p className="text-xs font-medium text-slate-500">{label}</p>
+      <p className="mt-2 truncate text-base font-semibold text-slate-950">{value}</p>
+    </div>
+  );
+}
+
+function ReviewLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2 last:border-b-0 last:pb-0">
+      <span className="text-slate-500">{label}</span>
+      <span className="text-right font-medium text-slate-950">{value}</span>
+    </div>
+  );
+}
+
+function CampaignDetail({
+  campaign,
+  activeTab,
+  onTabChange
+}: {
+  campaign: CampaignItem;
+  activeTab: DetailTab;
+  onTabChange: (tab: DetailTab) => void;
+}) {
+  const audienceSummary = getAudienceSummary(campaign);
+  const deliveryRate = getDeliveryRate(campaign);
 
   return (
-    <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${tone}`}>
-      <AlertTriangle className="h-3.5 w-3.5" />
-      {value}%
-    </span>
+    <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-soft ring-1 ring-white/70">
+      <div className="flex flex-col gap-4 border-b border-slate-100 pb-5 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="text-lg font-semibold tracking-tight text-slate-950">{campaign.name}</h2>
+            <StatusBadge status={campaign.status} />
+          </div>
+          <p className="mt-1 text-sm text-slate-500">{campaign.template.name}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {DETAIL_TABS.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => onTabChange(tab)}
+              className={cn(
+                "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
+                activeTab === tab
+                  ? "border-slate-950 bg-slate-950 text-white"
+                  : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+              )}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {activeTab === "Resumo" ? (
+        <div className="mt-5 grid gap-4 md:grid-cols-4">
+          <SummaryMetric label="Status" value={getStatusLabel(campaign.status)} />
+          <SummaryMetric label="Público" value={`${campaign.stats.total || audienceSummary.length} contatos`} />
+          <SummaryMetric label="Criada em" value={formatDateTime(campaign.createdAt)} />
+          <SummaryMetric label="Entrega" value={`${deliveryRate}%`} />
+        </div>
+      ) : null}
+
+      {activeTab === "Resultados" ? (
+        <div className="mt-5 grid gap-4 md:grid-cols-4">
+          <SummaryMetric label="Enviadas" value={String(campaign.stats.SENT || campaign.sentCount)} />
+          <SummaryMetric label="Falhas" value={String(campaign.stats.FAILED || campaign.failedCount)} />
+          <SummaryMetric label="Pendentes" value={String(campaign.stats.PENDING + campaign.stats.PROCESSING + campaign.stats.QUEUED)} />
+          <SummaryMetric label="Entrega" value={`${deliveryRate}%`} />
+        </div>
+      ) : null}
+
+      {activeTab === "Timeline" ? (
+        <div className="mt-5 grid gap-3 md:grid-cols-5">
+          {["Criada", "Validada", "Iniciada", "Pausada", "Concluída"].map((item) => (
+            <TimelineStep key={item} label={item} campaign={campaign} />
+          ))}
+        </div>
+      ) : null}
+
+      {activeTab === "Audiência" ? (
+        <div className="mt-5">
+          {audienceSummary.length === 0 ? (
+            <p className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-500">
+              Todos os contatos elegíveis.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {audienceSummary.map((item) => (
+                <span key={item} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700">
+                  {item}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function TimelineStep({ label, campaign }: { label: string; campaign: CampaignItem }) {
+  const active =
+    label === "Criada" ||
+    (label === "Validada" && campaign.status !== "DRAFT") ||
+    (label === "Iniciada" && ["RUNNING", "PAUSED", "COMPLETED"].includes(campaign.status)) ||
+    (label === "Pausada" && campaign.status === "PAUSED") ||
+    (label === "Concluída" && campaign.status === "COMPLETED");
+
+  return (
+    <div className={cn("rounded-2xl border p-4", active ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-slate-50")}>
+      <div className="flex items-center gap-2">
+        {active ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <Clock3 className="h-4 w-4 text-slate-400" />}
+        <p className={cn("text-sm font-semibold", active ? "text-emerald-800" : "text-slate-600")}>{label}</p>
+      </div>
+    </div>
+  );
+}
+
+function AudiencePreviewTable({
+  loading,
+  templateSelected,
+  preview,
+  selectedIds,
+  onToggle,
+  page,
+  onPageChange
+}: {
+  loading: boolean;
+  templateSelected: boolean;
+  preview: AudiencePreviewResponse | null;
+  selectedIds: string[];
+  onToggle: (contactId: string) => void;
+  page: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (loading) {
+    return <div className="py-8 text-sm text-slate-500">Carregando audiência...</div>;
+  }
+
+  if (!templateSelected) {
+    return <div className="py-8 text-sm text-slate-500">Selecione um template para revisar a audiência.</div>;
+  }
+
+  if (!preview || preview.recipients.length === 0) {
+    return <div className="py-8 text-sm text-slate-500">Nenhum contato encontrado.</div>;
+  }
+
+  return (
+    <div className="mt-4 overflow-x-auto">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="border-b border-slate-100 text-left text-xs font-semibold text-slate-500">
+            <th className="px-3 py-3">Sel.</th>
+            <th className="px-3 py-3">Nome</th>
+            <th className="px-3 py-3">Telefone</th>
+            <th className="px-3 py-3">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {preview.recipients.map((recipient) => (
+            <tr key={recipient.contactId} className="border-b border-slate-100">
+              <td className="px-3 py-3">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.includes(recipient.contactId)}
+                  onChange={() => onToggle(recipient.contactId)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+              </td>
+              <td className="px-3 py-3 font-medium text-slate-950">
+                {recipient.name}
+                <p className="mt-1 text-xs font-normal text-slate-500">{recipient.code}</p>
+              </td>
+              <td className="px-3 py-3 text-slate-600">{recipient.phone || "-"}</td>
+              <td className="px-3 py-3">
+                <SelectionStateBadge state={recipient.selectionState} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+        <span>
+          Página {preview.page} de {preview.totalPages}
+        </span>
+        <div className="flex gap-2">
+          <Button type="button" variant="secondary" onClick={() => onPageChange(Math.max(1, page - 1))} disabled={page <= 1}>
+            Anterior
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => onPageChange(Math.min(preview.totalPages, page + 1))}
+            disabled={page >= preview.totalPages}
+          >
+            Próxima
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SelectedAudienceList({
+  loading,
+  preview,
+  selectedCount,
+  onRemove
+}: {
+  loading: boolean;
+  preview: AudiencePreviewResponse | null;
+  selectedCount: number;
+  onRemove: (contactId: string) => void;
+}) {
+  if (loading) {
+    return <div className="rounded-2xl border border-slate-200 p-4 text-sm text-slate-500">Carregando selecionados...</div>;
+  }
+
+  if (selectedCount === 0) {
+    return <div className="rounded-2xl border border-slate-200 p-4 text-sm text-slate-500">Nenhum destinatário selecionado.</div>;
+  }
+
+  if (!preview) {
+    return <div className="rounded-2xl border border-slate-200 p-4 text-sm text-slate-500">Selecione um template para revisar.</div>;
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-200 p-4">
+      <div className="mb-4 flex flex-wrap gap-3 text-sm text-slate-600">
+        <span>Total {preview.totalSelecionados ?? selectedCount}</span>
+        <span>Elegíveis {preview.totalElegiveis}</span>
+        <span>Bloqueados {(preview.totalBloqueados ?? 0) + preview.totalInvalidos}</span>
+      </div>
+      <div className="max-h-[360px] space-y-2 overflow-auto pr-1">
+        {preview.recipients.map((recipient) => (
+          <div key={recipient.contactId} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3">
+            <div>
+              <p className="text-sm font-medium text-slate-950">{recipient.name}</p>
+              <p className="mt-1 text-xs text-slate-500">{recipient.phone || "-"}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <SelectionStateBadge state={recipient.selectionState} />
+              <Button type="button" variant="ghost" onClick={() => onRemove(recipient.contactId)}>
+                Remover
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

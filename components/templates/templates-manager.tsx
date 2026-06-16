@@ -144,7 +144,7 @@ export function TemplatesManager({ initialTemplates }: TemplatesManagerProps) {
 
   return (
     <div className="space-y-6">
-      <section className="rounded-[24px] border border-white/10 bg-white/5 p-5">
+      <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-soft">
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid gap-4 md:grid-cols-2">
             <Input value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Nome do template" />
@@ -157,11 +157,11 @@ export function TemplatesManager({ initialTemplates }: TemplatesManagerProps) {
             value={form.content}
             onChange={(event) => setForm((current) => ({ ...current, content: event.target.value }))}
             rows={5}
-            className="flex w-full rounded-[20px] border border-white/10 bg-slate-950/40 px-4 py-3 text-sm text-white outline-none"
+            className="flex w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 outline-none focus:border-brand-300 focus:bg-white"
             placeholder="Conteúdo aprovado pela Meta"
           />
 
-          <label className="flex items-center gap-3 text-sm text-slate-300">
+          <label className="flex items-center gap-3 text-sm text-slate-700">
             <input
               type="checkbox"
               checked={form.approved}
@@ -183,8 +183,8 @@ export function TemplatesManager({ initialTemplates }: TemplatesManagerProps) {
           </div>
         </form>
 
-        {error ? <p className="mt-4 text-sm text-rose-300">{error}</p> : null}
-        {feedback ? <p className="mt-4 text-sm text-emerald-300">{feedback}</p> : null}
+        {error ? <p className="mt-4 text-sm text-rose-700">{error}</p> : null}
+        {feedback ? <p className="mt-4 text-sm text-emerald-700">{feedback}</p> : null}
       </section>
 
       <section className="grid gap-4 md:grid-cols-2">
@@ -193,31 +193,36 @@ export function TemplatesManager({ initialTemplates }: TemplatesManagerProps) {
       </section>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        {filteredTemplates.map((template) => (
-          <article key={template.id} className="rounded-[24px] border border-white/10 bg-white/5 p-5">
+        {filteredTemplates.length === 0 ? (
+          <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 px-6 py-10 text-center text-sm text-slate-600 xl:col-span-2">
+            Nenhum template encontrado para os filtros selecionados.
+          </div>
+        ) : (
+          filteredTemplates.map((template) => (
+          <article key={template.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-soft">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="font-medium text-white">{template.name}</p>
-                <p className="mt-1 text-sm text-slate-400">
+                <p className="font-medium text-slate-950">{template.name}</p>
+                <p className="mt-1 text-sm text-slate-500">
                   {template.category} • {template.language}
                 </p>
               </div>
               <span
                 className={`rounded-full border px-3 py-1 text-xs font-semibold ${
                   template.approved
-                    ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-200"
-                    : "border-amber-400/20 bg-amber-400/10 text-amber-200"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : "border-amber-200 bg-amber-50 text-amber-800"
                 }`}
               >
                 {template.approved ? "Aprovado" : "Pendente"}
               </span>
             </div>
 
-            <p className="mt-4 rounded-[18px] border border-white/10 bg-slate-950/50 px-4 py-4 text-sm leading-6 text-slate-300">
+            <p className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm leading-6 text-slate-600">
               {template.content}
             </p>
 
-            <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-400">
+            <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
               <span>Template ID: {template.templateId}</span>
               <span>
                 Atualizado: {new Intl.DateTimeFormat("pt-BR", { dateStyle: "short" }).format(new Date(template.updatedAt))}
@@ -236,7 +241,8 @@ export function TemplatesManager({ initialTemplates }: TemplatesManagerProps) {
               </Button>
             </div>
           </article>
-        ))}
+          ))
+        )}
       </div>
     </div>
   );

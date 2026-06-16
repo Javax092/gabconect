@@ -1,4 +1,8 @@
-import { ConversationStatus, MessageDirection, QueuePriority } from "@prisma/client";
+import {
+  ConversationStatus,
+  MessageDirection,
+  QueuePriority,
+} from "@prisma/client";
 
 import { ApiRouteError, apiError, apiSuccess, parseRouteId } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
@@ -21,8 +25,8 @@ export async function POST(_request: Request, context: RouteContext) {
     const conversation = await prisma.conversation.findFirst({
       where: {
         id: conversationId,
-        mandateId
-      }
+        mandateId,
+      },
     });
 
     if (!conversation) {
@@ -36,8 +40,8 @@ export async function POST(_request: Request, context: RouteContext) {
         aiPaused: true,
         humanTakeoverActive: true,
         humanPriority: true,
-        currentQueue: QUEUE_NAMES.human
-      }
+        currentQueue: QUEUE_NAMES.human,
+      },
     });
 
     await enqueueJob(QUEUE_NAMES.human, {
@@ -50,8 +54,8 @@ export async function POST(_request: Request, context: RouteContext) {
         mandateId,
         conversationId: conversation.id,
         reason: "Conversa assumida manualmente.",
-        userId: user.id
-      }
+        userId: user.id,
+      },
     });
 
     return apiSuccess({ message: "Conversa enviada para a fila humana." });

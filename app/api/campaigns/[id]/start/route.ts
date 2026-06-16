@@ -1,18 +1,27 @@
-import { NextResponse } from "next/server";
-import {
-  CampaignPipelineStage,
-  CampaignStatus,
-  OperationEventLevel,
-  WhatsAppTemplateStatus
-} from "@prisma/client";
+import { CampaignStatus, Role, type CampaignMode } from "@prisma/client";
 
-import { ApiRouteError, apiError, apiSuccess, parseRouteId, readJson } from "@/lib/api";
+import {
+  ApiRouteError,
+  apiError,
+  apiSuccess,
+  parseRouteId,
+  readJson,
+} from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
-import { getCampaignAudiencePreview, queueCampaignRecipients } from "@/lib/campaign-execution";
-import { appendCampaignEvent, syncCampaignOperationState } from "@/lib/campaign-infrastructure";
-import { assertRealCampaignStartReady } from "@/lib/operational-readiness";
+import {
+  assertBusinessHours,
+  assertRealCampaignDeliveryReadiness,
+  getCampaignAudiencePreview,
+  isWithinBusinessHours,
+  resolveAudienceFilterByMode,
+  queueCampaignRecipients,
+} from "@/lib/campaign-execution";
 import { runCampaignSafetySimulation } from "@/lib/campaign-safety";
-import { syncCampaignCounters } from "@/lib/whatsapp-campaigns";
+import {
+  getCampaignModeDailyCap,
+  isMassCampaignEnabled,
+} from "@/lib/mass-campaign-config";
+import { assertRateLimit, getClientIp } from "@/lib/security";
 import { prisma } from "@/lib/prisma";
 
 type RouteContext = {
@@ -21,145 +30,90 @@ type RouteContext = {
   }>;
 };
 
-export async function POST(_request: Request, context: RouteContext) {
+function isCampaignTestBusinessHoursBypassEnabled(input: {
+  role: Role;
+  campaignMode: CampaignMode;
+  campaignId: string;
+}) {
+  const checks = {
+    nonProduction: process.env.NODE_ENV !== "production",
+    envEnabled: process.env.CAMPAIGN_TEST_BYPASS_BUSINESS_HOURS === "true",
+    adminUser: input.role === Role.ADMIN,
+    testCampaign: input.campaignMode === "TEST",
+  };
+
+  const allowed =
+    checks.nonProduction &&
+    checks.envEnabled &&
+    checks.adminUser &&
+    checks.testCampaign;
+
+  if (allowed) {
+    console.info("[campaign:start:bypass-business-hours-enabled]", {
+      campaignId: input.campaignId,
+      campaignMode: input.campaignMode,
+    });
+  } else {
+    console.warn("[campaign:start:bypass-business-hours-denied]", {
+      campaignId: input.campaignId,
+      campaignMode: input.campaignMode,
+      checks,
+    });
+  }
+
+  return allowed;
+}
+
+function getTemplateVariables(body: string) {
+  return Array.from(body.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)).map(
+    (match) => match[1],
+  );
+}
+
+export async function POST(request: Request, context: RouteContext) {
+  let campaignIdForFailure: string | null = null;
+  let mandateIdForFailure: string | null = null;
+  let campaignMarkedRunning = false;
+
   try {
-    const body = await readJson(_request).catch(() => ({}));
+    assertRateLimit({
+      key: `campaign:start:${getClientIp(request)}`,
+      limit: 10,
+      windowMs: 15 * 60_000,
+    });
+
+    const body = await readJson(request).catch(() => ({}));
+
     const confirmedAudience = Boolean(
-      body && typeof body === "object" && "confirmedAudience" in body ? body.confirmedAudience : false
+      body && typeof body === "object" && "confirmedAudience" in body
+        ? (body as { confirmedAudience?: unknown }).confirmedAudience
+        : false,
     );
+
     const user = await requireAuth();
     const { mandateId } = getMandateContext(user);
+
     const { id } = await context.params;
     const campaignId = parseRouteId(id);
 
+    campaignIdForFailure = campaignId;
+    mandateIdForFailure = mandateId;
+
     const campaign = await prisma.campaign.findFirst({
-      where: {
-        id: campaignId,
-        mandateId
-      },
+      where: { id: campaignId, mandateId },
       include: {
         template: true,
-        audienceConfig: true
-      }
+        audienceConfig: true,
+      },
     });
 
     if (!campaign) {
       throw new ApiRouteError(404, "Campanha não encontrada.", "NOT_FOUND");
     }
 
-    if (!confirmedAudience) {
-      throw new ApiRouteError(
-        400,
-        "Confirme a revisao dos destinatarios antes de iniciar.",
-        "AUDIENCE_CONFIRMATION_REQUIRED"
-      );
-    }
-
-    if (campaign.template.status !== WhatsAppTemplateStatus.APPROVED) {
-      throw new ApiRouteError(
-        400,
-        "A campanha só pode iniciar com template aprovado pela Meta.",
-        "TEMPLATE_NOT_APPROVED"
-      );
-    }
-
-    const simulation = await runCampaignSafetySimulation({
-      mandateId,
-      campaignId: campaign.id,
-      persist: true
-    });
-
-    if (simulation.riskLevel === "CRITICAL" || simulation.blockingReasons.length > 0) {
-      await prisma.campaign.update({
-        where: {
-          id: campaign.id
-        },
-        data: {
-          status: CampaignStatus.PAUSED
-        }
-      });
-      await prisma.campaignOperationState.upsert({
-        where: {
-          campaignId: campaign.id
-        },
-        update: {
-          pipelineStage: CampaignPipelineStage.RISK_DETECTED,
-          humanReviewNeeded: simulation.requiresHumanReview,
-          recommendedAction: simulation.recommendations[0] ?? "Corrigir sinais de risco antes de retomar.",
-          pausedReason: simulation.blockingReasons.join(" ")
-        },
-        create: {
-          campaignId: campaign.id,
-          pipelineStage: CampaignPipelineStage.RISK_DETECTED,
-          humanReviewNeeded: simulation.requiresHumanReview,
-          recommendedAction: simulation.recommendations[0] ?? "Corrigir sinais de risco antes de retomar.",
-          pausedReason: simulation.blockingReasons.join(" ")
-        }
-      });
-      await appendCampaignEvent({
-        mandateId,
-        campaignId: campaign.id,
-        level: OperationEventLevel.CRITICAL,
-        eventType: "campaign.blocked",
-        title: "Start bloqueado por risco critico",
-        message: simulation.blockingReasons.join(" "),
-        recommendedAction: simulation.recommendations[0] ?? "Aplicar plano de recuperacao e revisar a campanha."
-      });
-
-      throw new ApiRouteError(
-        409,
-        simulation.blockingReasons[0] ?? "A campanha foi bloqueada pela analise de seguranca.",
-        "CRITICAL_RISK_BLOCKED"
-      );
-    }
-
-    if (simulation.requiresHumanReview) {
-      await prisma.campaign.update({
-        where: {
-          id: campaign.id
-        },
-        data: {
-          status: CampaignStatus.PAUSED
-        }
-      });
-      await prisma.campaignOperationState.upsert({
-        where: {
-          campaignId: campaign.id
-        },
-        update: {
-          pipelineStage: CampaignPipelineStage.HUMAN_REVIEW,
-          humanReviewNeeded: true,
-          recommendedAction: simulation.recommendations[0] ?? "Aguardar revisao humana antes do start.",
-          pausedReason: "Preflight exigiu revisao humana obrigatoria."
-        },
-        create: {
-          campaignId: campaign.id,
-          pipelineStage: CampaignPipelineStage.HUMAN_REVIEW,
-          humanReviewNeeded: true,
-          recommendedAction: simulation.recommendations[0] ?? "Aguardar revisao humana antes do start.",
-          pausedReason: "Preflight exigiu revisao humana obrigatoria."
-        }
-      });
-      await appendCampaignEvent({
-        mandateId,
-        campaignId: campaign.id,
-        level: OperationEventLevel.WARN,
-        eventType: "campaign.review_required",
-        title: "Revisao humana obrigatoria",
-        message: "A campanha foi encaminhada para revisao humana antes da liberacao operacional.",
-        recommendedAction: simulation.recommendations[0] ?? "Validar conteudo, template e audiencia."
-      });
-
-      return apiSuccess(
-        {
-          simulation,
-          message: "Preflight concluido. A campanha foi movida para revisao humana."
-        },
-        202
-      );
-    }
-
-    const audienceFilter = {
+    const audienceFilter = resolveAudienceFilterByMode({
+      mode: campaign.campaignMode,
+      selectedContactIds: campaign.audienceConfig?.selectedContactIds ?? [],
       birthdayMonthDay: campaign.audienceConfig?.birthdayMonthDay ?? null,
       tags: campaign.audienceConfig?.tags ?? campaign.segmentTags,
       groups: campaign.audienceConfig?.groups ?? [],
@@ -167,115 +121,205 @@ export async function POST(_request: Request, context: RouteContext) {
       locations: campaign.audienceConfig?.locations ?? [],
       interests: campaign.audienceConfig?.interests ?? [],
       contactTypes: campaign.audienceConfig?.contactTypes ?? [],
-      selectedContactIds: campaign.audienceConfig?.selectedContactIds ?? []
-    };
-    const selectedContactIds = campaign.audienceConfig?.selectedContactIds ?? [];
+    });
+
+    const selectedContactIds = audienceFilter.selectedContactIds ?? [];
+    const isManualSelection = selectedContactIds.length > 0;
+
+    const effectiveSelectedContactIds =
+      campaign.campaignMode === "TEST" && !isManualSelection
+        ? []
+        : selectedContactIds;
+
     const audiencePreview = await getCampaignAudiencePreview({
       mandateId,
       campaignId: campaign.id,
       templateBody: campaign.template.body,
       audienceFilter,
-      selectedContactIds,
-      selectedOnly: selectedContactIds.length > 0,
-      showOnlyEligible: false
+      selectedContactIds: effectiveSelectedContactIds,
+      selectedOnly: isManualSelection,
+      showOnlyEligible: false,
     });
 
-    console.info("[campaign-start] audience-check", {
-      campaignId: campaign.id,
-      mandateId,
-      selectedContactIds: selectedContactIds.length,
-      foundContacts: audiencePreview.totalEncontrados,
-      eligibleContacts: audiencePreview.totalElegiveis,
-      skippedContacts: Math.max(0, audiencePreview.totalMatched - audiencePreview.totalElegiveis),
-      blockedBy: audiencePreview.blockedBy
-    });
-
-    if (audiencePreview.totalElegiveis === 0) {
-      return NextResponse.json(
-        {
-          error: "Nenhum destinatário elegível",
-          details: {
-          selectedContactIds: selectedContactIds.length,
-          foundContacts: audiencePreview.totalEncontrados,
-          eligibleContacts: audiencePreview.totalElegiveis,
-          blockedBy: audiencePreview.blockedBy
-          }
-        },
-        { status: 400 }
+    if (campaign.campaignMode === "TEST" && selectedContactIds.length === 0) {
+      throw new ApiRouteError(
+        400,
+        "Selecione pelo menos um contato para o modo TEST.",
+        "TEST_NO_SELECTED_CONTACTS",
       );
     }
 
-    await assertRealCampaignStartReady({
-      mandateId,
-      templateApproved: campaign.template.status === WhatsAppTemplateStatus.APPROVED,
-      audiencePreview: {
-        totalElegiveis: audiencePreview.totalElegiveis,
-        totalInvalidos: audiencePreview.totalInvalidos,
-        totalBloqueados: audiencePreview.totalBloqueados,
-        totalOptOut: audiencePreview.totalOptOut,
-        totalSemTelefone: audiencePreview.totalSemTelefone
-      }
-    });
+    if (
+      campaign.campaignMode === "BIRTHDAY" &&
+      audiencePreview.totalElegiveis === 0
+    ) {
+      throw new ApiRouteError(
+        400,
+        "Nenhum aniversariante elegível.",
+        "BIRTHDAY_NO_ELIGIBLE",
+      );
+    }
 
-    await appendCampaignEvent({
+    if (
+      campaign.campaignMode === "AUDIENCE" &&
+      audiencePreview.totalElegiveis === 0
+    ) {
+      throw new ApiRouteError(
+        400,
+        "Nenhum contato elegível.",
+        "AUDIENCE_NO_ELIGIBLE",
+      );
+    }
+
+    const safetySummary = {
+      totalContatos: audiencePreview.totalMatched,
+      totalElegivel: audiencePreview.totalElegiveis,
+      totalBloqueado: audiencePreview.totalBloqueados,
+      totalOptOut: audiencePreview.totalOptOut,
+      estimatedDurationMinutes: Math.ceil(
+        (audiencePreview.totalElegiveis * Math.max(campaign.delaySeconds, 1)) /
+          60,
+      ),
+      campaignMode: campaign.campaignMode,
+      modeDailyCap: getCampaignModeDailyCap(campaign.campaignMode),
+    };
+
+    if (!isMassCampaignEnabled()) {
+      throw new ApiRouteError(
+        403,
+        "Campanhas em massa desabilitadas.",
+        "MASS_CAMPAIGN_DISABLED",
+        safetySummary,
+      );
+    }
+
+    if (!confirmedAudience) {
+      throw new ApiRouteError(
+        400,
+        "Confirme a audiência.",
+        "AUDIENCE_CONFIRMATION_REQUIRED",
+        safetySummary,
+      );
+    }
+
+    const simulation = await runCampaignSafetySimulation({
       mandateId,
       campaignId: campaign.id,
-      eventType: "CAMPAIGN_AUDIENCE_CONFIRMED",
-      title: "Publico confirmado",
-      message: `${audiencePreview.totalElegiveis} destinatarios elegiveis confirmados para inicio supervisionado.`,
-      metadata: {
-        totalElegiveis: audiencePreview.totalElegiveis,
-        totalOptOut: audiencePreview.totalOptOut,
-        totalSemTelefone: audiencePreview.totalSemTelefone,
-        totalSemOptIn: audiencePreview.totalSemOptIn,
-        totalInvalidos: audiencePreview.totalInvalidos
-      }
+      persist: true,
+    });
+
+    if (simulation.riskLevel === "CRITICAL") {
+      await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: { status: CampaignStatus.PAUSED },
+      });
+
+      throw new ApiRouteError(
+        409,
+        "Bloqueado por risco crítico.",
+        "CRITICAL_RISK_BLOCKED",
+      );
+    }
+
+    const bypassBusinessHours = !isWithinBusinessHours()
+      ? isCampaignTestBusinessHoursBypassEnabled({
+          role: user.role,
+          campaignMode: campaign.campaignMode,
+          campaignId: campaign.id,
+        })
+      : false;
+
+    if (!bypassBusinessHours) {
+      assertBusinessHours();
+    }
+
+    console.info("[campaign-start-template]", {
+      campaignId: campaign.id,
+      templateId: campaign.template.id,
+      templateName: campaign.template.metaTemplateName,
+      language: campaign.template.language,
+      category: campaign.template.category,
+      status: campaign.template.status,
+      variables: getTemplateVariables(campaign.template.body),
+      bodyHasVariables: getTemplateVariables(campaign.template.body).length > 0,
+    });
+
+    const readiness = await assertRealCampaignDeliveryReadiness({
+      templateName: campaign.template.metaTemplateName,
+      templateLanguage: campaign.template.language,
+      templateStatus: campaign.template.status,
+      templateCategory: campaign.template.category,
+      templateBody: campaign.template.body,
     });
 
     const updatedCampaign = await prisma.campaign.update({
-      where: {
-        id: campaign.id
-      },
-      data: {
-        status: CampaignStatus.RUNNING,
-        dailyLimit: Math.min(campaign.dailyLimit, simulation.recommendedDailyLimit),
-        delaySeconds: simulation.recommendedDelayMinSeconds
-      }
+      where: { id: campaign.id },
+      data: { status: CampaignStatus.RUNNING },
     });
+    campaignMarkedRunning = true;
 
     const queuedBatch = await queueCampaignRecipients({
       mandateId,
       campaignId: campaign.id,
       recommendedDailyLimit: simulation.recommendedDailyLimit,
-      recommendedDelaySeconds: simulation.recommendedDelayMinSeconds
+      recommendedDelaySeconds: simulation.recommendedDelayMinSeconds,
+      bypassBusinessHours,
     });
 
-    await syncCampaignCounters(campaign.id);
-    await syncCampaignOperationState(campaign.id);
-    await appendCampaignEvent({
-      mandateId,
-      campaignId: campaign.id,
-      eventType: "campaign.started",
-      title: "Campanha iniciada",
-      message: "Pipeline liberado com plano seguro recomendado, warmup supervisionado e throughput adaptativo.",
-      recommendedAction:
-        simulation.recommendations[0] ??
-        "Monitorar reputacao, delays e estabilidade nos primeiros lotes."
-    });
+    if (queuedBatch.queuedCount <= 0) {
+      await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: { status: CampaignStatus.FAILED },
+      });
+
+      throw new ApiRouteError(
+        409,
+        "Nenhum envio foi enfileirado; campanha não iniciada.",
+        "NO_DELIVERIES_QUEUED",
+        {
+          safeDailyLimit: queuedBatch.safeDailyLimit,
+          recipientSummary: queuedBatch.recipientSummary,
+        },
+      );
+    }
+
+    // ⚠️ removido syncCampaignCounters (provável fonte de inconsistência)
+    // await syncCampaignCounters(campaign.id);
 
     return apiSuccess({
       campaign: updatedCampaign,
       simulation,
+      readiness,
+      safetySummary,
       createdRecipients: queuedBatch.recipientSummary.createdRecipients,
       eligibleContacts: queuedBatch.recipientSummary.eligibleContacts,
       queuedDeliveries: queuedBatch.queuedCount,
-      redirectTo: `/admin/campaigns/operations?campaignId=${campaign.id}`,
-      message:
-        queuedBatch.queuedCount > 0
-          ? "Campanha iniciada. Deliveries e fila de saída foram gerados; nada foi enviado diretamente para a Meta."
-          : "Campanha iniciada, mas nenhum novo delivery foi enfileirado nesta execução."
     });
   } catch (error) {
+    if (campaignMarkedRunning && campaignIdForFailure) {
+      await prisma.campaign.update({
+        where: { id: campaignIdForFailure },
+        data: { status: CampaignStatus.FAILED },
+      }).catch(() => undefined);
+    }
+
+    if (
+      error instanceof ApiRouteError &&
+      error.code === "TEMPLATE_INVALID"
+    ) {
+      console.error(
+        "[campaign-start-template-invalid-details]",
+        JSON.stringify(error.details ?? null, null, 2),
+      );
+    }
+
+    console.error("[campaign-start-error]", error);
+
+    console.error("[campaign-start-context]", {
+      campaignId: campaignIdForFailure,
+      mandateId: mandateIdForFailure,
+    });
+
     return apiError(error);
   }
 }

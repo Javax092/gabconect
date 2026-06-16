@@ -144,7 +144,7 @@ export function PreflightCheckModal({
                 />
               </div>
               <div className="mt-3 grid gap-2 text-sm text-cyan-50/85">
-                <p>A campanha será colocada em fila e não dispara instantaneamente.</p>
+                <p>A campanha será colocada em fila e não fará envio imediato em massa.</p>
                 <p>O worker processará os envios gradualmente conforme a cadência recomendada.</p>
                 <p>O delay humano distribui as mensagens para manter uma operação segura.</p>
                 <p>O compliance aplica validações automáticas antes e durante o processamento.</p>

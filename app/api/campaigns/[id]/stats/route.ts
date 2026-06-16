@@ -95,6 +95,8 @@ export async function GET(_request: Request, context: RouteContext) {
       stats.total += row._count._all;
 
       if (row.status === CampaignRecipientStatus.PENDING) stats.pending = row._count._all;
+      if (row.status === CampaignRecipientStatus.PROCESSING) stats.pending += row._count._all;
+      if (row.status === CampaignRecipientStatus.QUEUED) stats.pending += row._count._all;
       if (row.status === CampaignRecipientStatus.SENT) stats.sent = row._count._all;
       if (row.status === CampaignRecipientStatus.FAILED) stats.failed = row._count._all;
       if (row.status === CampaignRecipientStatus.SKIPPED) stats.skipped = row._count._all;

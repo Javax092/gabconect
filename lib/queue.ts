@@ -1,383 +1,237 @@
 import { Queue, QueueEvents, Worker, type JobsOptions } from "bullmq";
+import IORedis from "ioredis";
 import { MessageDirection, Prisma, QueuePriority, QueueStatus } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { getRedisHealth, getRedisState } from "@/lib/redis";
 
 export const QUEUE_NAMES = {
-  incoming: "incoming-message",
-  outgoing: "outgoing-message",
-  human: "human-escalation"
+  incoming: "incoming",
+  outgoing: "outgoing",
+  human: "human"
 } as const;
 
-type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
+export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 
-export type IncomingMessageJobPayload = {
-  queueRecordId: string;
-  message: {
-    externalMessageId: string;
-    fromPhone: string;
-    profileName: string | null;
-    text: string;
-    timestamp: string;
-    phoneNumberId: string | null;
-    displayPhoneNumber: string | null;
-  };
-};
-
-export type ConversationOutgoingMessageJobPayload = {
-  queueRecordId: string;
-  kind: "CONVERSATION";
-  messageId: string;
-  conversationId: string;
+type EnqueueInput = {
   mandateId: string;
-  phone: string;
-  text: string;
-  source: "AI" | "HUMAN" | "TEMPLATE";
-  scheduledFor: string;
+  conversationId?: string | null;
+  messageId?: string | null;
+  direction?: MessageDirection;
+  priority?: QueuePriority;
+  scheduledFor?: Date | string;
+  payload?: Record<string, unknown>;
+  queueRecordId?: string;
+  requireBullMQ?: boolean;
+  [key: string]: unknown;
 };
 
-export type CampaignOutgoingMessageJobPayload = {
-  queueRecordId: string;
-  kind: "CAMPAIGN";
-  mandateId: string;
-  campaignId: string;
-  campaignRecipientId: string;
-  contactId: string;
-  phone: string;
-  contactName: string;
-  templateId: string;
-  templateBody: string;
-  metaTemplateName: string;
-  language: string;
-  personalizedText: string;
-  scheduledFor: string;
-};
+let connection: IORedis | null = null;
+const queues = new Map<QueueName, Queue>();
 
-export type OutgoingMessageJobPayload =
-  | ConversationOutgoingMessageJobPayload
-  | CampaignOutgoingMessageJobPayload;
-
-export type HumanEscalationJobPayload = {
-  queueRecordId: string;
-  mandateId: string;
-  conversationId: string;
-  reason: string;
-  userId?: string | null;
-};
-
-type JobPayloadMap = {
-  [QUEUE_NAMES.incoming]: IncomingMessageJobPayload;
-  [QUEUE_NAMES.outgoing]: OutgoingMessageJobPayload;
-  [QUEUE_NAMES.human]: HumanEscalationJobPayload;
-};
-
-type FallbackProcessorMap = Partial<{
-  [K in QueueName]: (payload: JobPayloadMap[K]) => Promise<void>;
-}>;
-
-type QueueJobResult = {
-  queued: boolean;
-  mode: "bullmq" | "dev-fallback";
-  queueRecordId: string;
-};
-
-const defaultJobOptions: JobsOptions = {
-  attempts: 5,
-  backoff: {
-    type: "exponential",
-    delay: 2_000
-  },
-  removeOnComplete: 200,
-  removeOnFail: 100
-};
-
-const queueCache = new Map<QueueName, Queue>();
-const fallbackProcessors: FallbackProcessorMap = {};
-let fallbackNoticeShown = false;
-
-function createQueueMetadata(payload: unknown) {
-  return payload as Prisma.InputJsonValue;
+function getRedisUrl() {
+  return process.env.REDIS_URL?.trim() || null;
 }
 
-function isDevFallbackAllowed() {
-  return process.env.NODE_ENV !== "production" && !process.env.REDIS_URL;
-}
+function getConnection() {
+  const redisUrl = getRedisUrl();
 
-function resolveQueuePriority(priority?: QueuePriority) {
-  if (priority) {
-    return priority;
-  }
-
-  return QueuePriority.NORMAL;
-}
-
-function toBullPriority(priority: QueuePriority) {
-  if (priority === QueuePriority.HIGH) {
-    return 1;
-  }
-
-  if (priority === QueuePriority.LOW) {
-    return 10;
-  }
-
-  return 5;
-}
-
-function showFallbackNotice() {
-  if (fallbackNoticeShown) {
-    return;
-  }
-
-  console.warn("Rodando sem Redis: modo fallback de desenvolvimento");
-  fallbackNoticeShown = true;
-}
-
-async function getQueue(name: QueueName) {
-  const cached = queueCache.get(name);
-
-  if (cached) {
-    return cached;
-  }
-
-  const redis = await getRedisState();
-
-  if (!redis.enabled) {
+  if (!redisUrl) {
     return null;
   }
 
-  const queue = new Queue(name, {
-    connection: redis.connection,
-    defaultJobOptions
-  });
+  if (!connection) {
+    connection = new IORedis(redisUrl, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: false,
+      lazyConnect: true,
+      connectTimeout: 1000,
+      retryStrategy: () => null
+    });
+    connection.on("error", () => undefined);
+  }
 
-  queueCache.set(name, queue);
+  return connection;
+}
+
+async function getQueue(name: QueueName) {
+  const existing = queues.get(name);
+
+  if (existing) {
+    return existing;
+  }
+
+  const redis = getConnection();
+
+  if (!redis) {
+    return null;
+  }
+
+  const queue = new Queue(name, { connection: redis as any });
+  queues.set(name, queue);
   return queue;
 }
 
-async function runDevFallback<T extends QueueName>(
-  name: T,
-  payload: JobPayloadMap[T],
-  scheduledFor: Date
-) {
-  const processor = fallbackProcessors[name];
-
-  if (!processor) {
-    throw new Error(`Nenhum processor fallback registrado para a fila ${name}.`);
+function getMetadata(input: EnqueueInput) {
+  if (input.payload) {
+    return input.payload;
   }
 
-  showFallbackNotice();
+  const {
+    mandateId: _mandateId,
+    conversationId: _conversationId,
+    messageId: _messageId,
+    direction: _direction,
+    priority: _priority,
+    scheduledFor: _scheduledFor,
+    payload: _payload,
+    requireBullMQ: _requireBullMQ,
+    ...metadata
+  } = input;
 
-  const delay = Math.max(0, scheduledFor.getTime() - Date.now());
-
-  setTimeout(() => {
-    void processor(payload).catch(async (error) => {
-      if (payload.queueRecordId) {
-        await updateQueueRecord(payload.queueRecordId, QueueStatus.FAILED, {
-          failedAt: new Date(),
-          error: error instanceof Error ? error.message : "Falha em fallback local."
-        });
-      }
-    });
-  }, delay);
+  return metadata;
 }
 
-export function registerFallbackProcessor<T extends QueueName>(
-  name: T,
-  processor: (payload: JobPayloadMap[T]) => Promise<void>
-) {
-  fallbackProcessors[name] = processor as FallbackProcessorMap[T];
-}
-
-export async function enqueueJob<T extends QueueName>(
-  name: T,
-  {
-    mandateId,
-    conversationId,
-    messageId,
-    direction,
-    priority,
-    scheduledFor = new Date(),
-    payload
-  }: {
-    mandateId: string;
-    conversationId?: string | null;
-    messageId?: string | null;
-    direction: MessageDirection;
-    priority?: QueuePriority;
-    scheduledFor?: Date;
-    payload: JobPayloadMap[T];
-  }
-): Promise<QueueJobResult> {
-  const normalizedPriority = resolveQueuePriority(priority);
-
+export async function enqueueJob(name: QueueName, input: EnqueueInput, options?: JobsOptions) {
+  const scheduledFor = input.scheduledFor ? new Date(input.scheduledFor) : new Date();
+  const metadata = getMetadata(input);
   const queueRecord = await prisma.messageQueue.create({
     data: {
-      mandateId,
-      conversationId: conversationId ?? undefined,
-      messageId: messageId ?? undefined,
-      direction,
-      status: QueueStatus.QUEUED,
-      priority: normalizedPriority,
+      mandateId: input.mandateId,
+      conversationId: input.conversationId ?? null,
+      messageId: input.messageId ?? null,
+      direction: input.direction ?? MessageDirection.OUTBOUND,
+      priority: input.priority ?? QueuePriority.NORMAL,
       scheduledFor,
-      metadata: createQueueMetadata(payload)
+      status: QueueStatus.QUEUED,
+      metadata: metadata as Prisma.InputJsonObject
     }
   });
 
-  const enrichedPayload = {
-    ...payload,
+  const payload: Record<string, unknown> = {
+    ...metadata,
     queueRecordId: queueRecord.id
-  } as JobPayloadMap[T];
+  };
 
-  await prisma.messageQueue.update({
-    where: { id: queueRecord.id },
-    data: {
-      metadata: createQueueMetadata(enrichedPayload)
-    }
-  });
+  try {
+    const queue = await getQueue(name);
 
-  const queue = await getQueue(name);
-
-  if (!queue) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("REDIS_URL ausente em produção. Redis é obrigatório para BullMQ.");
-    }
-    if (fallbackProcessors[name]) {
-      await runDevFallback(name, enrichedPayload, scheduledFor);
-    } else {
-      showFallbackNotice();
+    if (!queue && input.requireBullMQ) {
+      throw new Error("BullMQ indisponível: REDIS_URL ausente ou Redis inacessível.");
     }
 
-    return {
-      queued: false,
-      mode: "dev-fallback",
-      queueRecordId: queueRecord.id
-    };
+    if (queue) {
+      await queue.add(name, payload, {
+        delay: Math.max(0, scheduledFor.getTime() - Date.now()),
+        ...options
+      });
+      if (name === QUEUE_NAMES.outgoing) {
+        console.info("[queue:outgoing:add]", {
+          queue: name,
+          jobName: name,
+          queueRecordId: queueRecord.id,
+          kind: payload.kind ?? null,
+          campaignId: payload.campaignId ?? null,
+          campaignRecipientId: payload.campaignRecipientId ?? null,
+          scheduledFor: scheduledFor.toISOString()
+        });
+      }
+    }
+  } catch (error) {
+    if (input.requireBullMQ) {
+      await prisma.messageQueue.update({
+        where: {
+          id: queueRecord.id
+        },
+        data: {
+          status: QueueStatus.FAILED,
+          failedAt: new Date(),
+          error: error instanceof Error ? error.message : "Falha ao enfileirar no BullMQ."
+        }
+      });
+      throw error;
+    }
+
+    console.error("[queue] BullMQ enqueue failed; database queue record preserved", {
+      queue: name,
+      queueRecordId: queueRecord.id,
+      error: error instanceof Error ? error.message : "unknown error"
+    });
   }
 
-  await queue.add(name, enrichedPayload, {
-    ...defaultJobOptions,
-    delay: Math.max(0, scheduledFor.getTime() - Date.now()),
-    priority: toBullPriority(normalizedPriority)
-  });
-
   return {
-    queued: true,
-    mode: "bullmq",
-    queueRecordId: queueRecord.id
+    queueRecordId: queueRecord.id,
+    payload
   };
 }
 
-export async function updateQueueRecord(
-  queueRecordId: string,
-  status: QueueStatus,
-  input: {
-    processedAt?: Date | null;
-    failedAt?: Date | null;
-    error?: string | null;
-    retryCount?: number;
-  } = {}
-) {
-  await prisma.messageQueue.update({
-    where: { id: queueRecordId },
-    data: {
-      status,
-      processedAt: input.processedAt ?? undefined,
-      failedAt: input.failedAt ?? undefined,
-      error: input.error ?? undefined,
-      retryCount: input.retryCount ?? undefined
-    }
-  });
+export async function enqueueOutgoingJob(input: EnqueueInput, options?: JobsOptions) {
+  return enqueueJob(QUEUE_NAMES.outgoing, input, options);
 }
 
-export async function createQueueWorker<T extends QueueName>(
-  name: T,
-  processor: (payload: JobPayloadMap[T]) => Promise<void>
-) {
-  registerFallbackProcessor(name, processor);
+export async function enqueueHumanJob(input: EnqueueInput, options?: JobsOptions) {
+  return enqueueJob(QUEUE_NAMES.human, input, options);
+}
 
-  const redis = await getRedisState();
+export async function createQueueWorker<T = unknown>(name: QueueName, processor: (payload: T) => Promise<void>) {
+  const redis = getConnection();
 
-  if (!redis.enabled) {
-    if (isDevFallbackAllowed()) {
-      showFallbackNotice();
-      return null;
-    }
-
-    throw new Error(redis.reason);
+  if (!redis) {
+    return null;
   }
 
-  const worker = new Worker(
-    name,
-    async (job) => {
-      const payload = job.data as JobPayloadMap[T];
-      await processor(payload);
-    },
-    {
-      connection: redis.connection,
-      concurrency: name === QUEUE_NAMES.outgoing ? 2 : 6
-    }
-  );
-
-  worker.on("failed", async (job, error) => {
-    const payload = job?.data as { queueRecordId?: string } | undefined;
-
-    if (payload?.queueRecordId) {
-      await updateQueueRecord(payload.queueRecordId, QueueStatus.FAILED, {
-        failedAt: new Date(),
-        error: error.message,
-        retryCount: job?.attemptsMade ?? 0
-      });
-    }
+  return new Worker<T>(name, async (job) => processor(job.data as T), {
+    connection: redis as any
   });
-
-  worker.on("completed", async (job) => {
-    const payload = job.data as { queueRecordId?: string };
-
-    if (payload?.queueRecordId) {
-      await prisma.messageQueue.updateMany({
-        where: {
-          id: payload.queueRecordId,
-          status: QueueStatus.PROCESSING
-        },
-        data: {
-          status: QueueStatus.SENT,
-          processedAt: new Date(),
-          retryCount: job.attemptsMade
-        }
-      });
-    }
-  });
-
-  return worker;
 }
 
-export async function createQueueEvents(name: QueueName) {
-  const redis = await getRedisState();
+export function createQueueEvents(name: QueueName) {
+  const redis = getConnection();
 
-  if (!redis.enabled) {
+  if (!redis) {
     return null;
   }
 
   return new QueueEvents(name, {
-    connection: redis.connection
+    connection: redis as any
   });
 }
 
 export async function getQueueHealth() {
-  const redis = await getRedisHealth();
+  const redis = getConnection();
 
-  if (redis.status !== "ready") {
+  if (!redis) {
     return {
-      redis: redis.status,
-      reason: redis.reason,
-      queues: isDevFallbackAllowed() ? "dev-fallback" : "unavailable"
-    } as const;
+      redis: "degraded",
+      queues: "database",
+      reason: "REDIS_URL ausente",
+      checkedAt: new Date().toISOString()
+    };
   }
 
-  return {
-    redis: "ready" as const,
-    reason: redis.reason,
-    queues: "bullmq"
-  };
+  try {
+    const start = Date.now();
+    await redis.ping();
+    const outgoingQueue = await getQueue(QUEUE_NAMES.outgoing);
+    const counts = outgoingQueue ? await outgoingQueue.getJobCounts() : null;
+
+    return {
+      redis: "ready",
+      queues: "bullmq",
+      latencyMs: Date.now() - start,
+      counts,
+      checkedAt: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error("[queue] health check failed", error);
+    connection?.disconnect();
+    connection = null;
+    queues.clear();
+
+    return {
+      redis: "degraded",
+      queues: "database",
+      reason: error instanceof Error ? error.message : "Redis indisponível",
+      checkedAt: new Date().toISOString()
+    };
+  }
 }

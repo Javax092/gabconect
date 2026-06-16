@@ -3,8 +3,12 @@ import { z } from "zod";
 
 import { ApiRouteError, apiError, apiSuccess, readJson, validateSchema } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
+import { cancelQueuedCampaignDeliveries } from "@/lib/campaign-queue-cancellation";
+import { recordConsent, suppressContact } from "@/lib/consent";
 import { isValidPhone, normalizePhone, normalizeTagsInput, parseCsvRows, resolveContactStatus } from "@/lib/contacts";
+import { invalidateContactOperationalCache } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
+import { assertRateLimit, getClientIp } from "@/lib/security";
 
 const listSchema = z.object({
   q: z.string().trim().optional().default(""),
@@ -40,6 +44,17 @@ function serializeContact(contact: {
   source: string;
   tags: string[];
   birthday: Date | null;
+  neighborhood: string | null;
+  zone: string | null;
+  city: string | null;
+  role: string | null;
+  influenceLevel: string | null;
+  interestArea: string | null;
+  politicalTemperature: string | null;
+  relationshipType: string | null;
+  nextAction: string | null;
+  notes: string | null;
+  lastInteractionAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }) {
@@ -48,6 +63,7 @@ function serializeContact(contact: {
     code: contact.id.slice(-8).toUpperCase(),
     invalidPhone: !isValidPhone(contact.phone),
     birthday: contact.birthday?.toISOString() ?? null,
+    lastInteractionAt: contact.lastInteractionAt?.toISOString() ?? null,
     optInAt: contact.optInAt?.toISOString() ?? null,
     createdAt: contact.createdAt.toISOString(),
     updatedAt: contact.updatedAt.toISOString()
@@ -97,8 +113,15 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    assertRateLimit({
+      key: `contacts:write:${getClientIp(request)}`,
+      limit: 30,
+      windowMs: 15 * 60_000
+    });
+
     const user = await requireAuth();
     const { mandateId } = getMandateContext(user);
+    const ipAddress = getClientIp(request);
     const body = await readJson(request);
 
     if (body && typeof body === "object" && body.mode === "csv") {
@@ -118,6 +141,7 @@ export async function POST(request: Request) {
 
         const optIn = (row.optin ?? "").trim().toLowerCase();
         const resolvedOptIn = optIn ? ["1", "true", "sim", "yes"].includes(optIn) : parsed.defaultOptIn;
+        const resolvedStatus = resolveContactStatus(row.status, normalizedPhone);
         const contact = await prisma.contact.upsert({
           where: {
             mandateId_phone: {
@@ -132,7 +156,7 @@ export async function POST(request: Request) {
             optIn: resolvedOptIn,
             optInAt: resolvedOptIn ? new Date() : null,
             birthday: row.birthday ? new Date(row.birthday) : null,
-            status: resolveContactStatus(row.status, normalizedPhone)
+            status: resolvedStatus
           },
           create: {
             mandateId,
@@ -143,12 +167,39 @@ export async function POST(request: Request) {
             optIn: resolvedOptIn,
             optInAt: resolvedOptIn ? new Date() : null,
             birthday: row.birthday ? new Date(row.birthday) : null,
-            status: resolveContactStatus(row.status, normalizedPhone)
+            status: resolvedStatus
           }
         });
+        await recordConsent({
+          mandateId,
+          contactId: contact.id,
+          phone: contact.phone,
+          action: resolvedOptIn ? "IMPORTED_OPT_IN" : "OPT_OUT",
+          source: parsed.source || "csv",
+          reason: resolvedOptIn ? "Importação CSV com opt-in informado." : "Importação CSV sem opt-in ativo.",
+          ipAddress,
+          userId: user.id
+        });
+
+        if (!resolvedOptIn || resolvedStatus !== "ACTIVE") {
+          await suppressContact({
+            mandateId,
+            contactId: contact.id,
+            phone: contact.phone,
+            reason: resolvedStatus !== "ACTIVE" ? `Status ${resolvedStatus}.` : "Contato sem opt-in ativo.",
+            source: parsed.source || "csv"
+          });
+          await cancelQueuedCampaignDeliveries({
+            mandateId,
+            contactId: contact.id,
+            reason: "Contato importado sem elegibilidade para envio."
+          });
+        }
 
         importedIds.push(contact.id);
       }
+
+      invalidateContactOperationalCache(mandateId);
 
       return apiSuccess({
         importedCount: importedIds.length,
@@ -158,6 +209,7 @@ export async function POST(request: Request) {
 
     const parsed = validateSchema(createSingleSchema, body);
     const phone = normalizePhone(parsed.phone);
+    const resolvedStatus = resolveContactStatus(parsed.status, phone);
     const contact = await prisma.contact.upsert({
       where: {
         mandateId_phone: {
@@ -172,7 +224,7 @@ export async function POST(request: Request) {
         optIn: parsed.optIn,
         optInAt: parsed.optIn ? new Date() : null,
         birthday: parsed.birthday ? new Date(parsed.birthday) : null,
-        status: resolveContactStatus(parsed.status, phone)
+        status: resolvedStatus
       },
       create: {
         mandateId,
@@ -183,9 +235,35 @@ export async function POST(request: Request) {
         optIn: parsed.optIn,
         optInAt: parsed.optIn ? new Date() : null,
         birthday: parsed.birthday ? new Date(parsed.birthday) : null,
-        status: resolveContactStatus(parsed.status, phone)
+        status: resolvedStatus
       }
     });
+    await recordConsent({
+      mandateId,
+      contactId: contact.id,
+      phone: contact.phone,
+      action: parsed.optIn ? "MANUAL_OPT_IN" : "MANUAL_OPT_OUT",
+      source: parsed.source || "manual",
+      reason: parsed.optIn ? "Cadastro manual com opt-in." : "Cadastro manual sem opt-in ativo.",
+      ipAddress,
+      userId: user.id
+    });
+
+    if (!parsed.optIn || resolvedStatus !== "ACTIVE") {
+      await suppressContact({
+        mandateId,
+        contactId: contact.id,
+        phone: contact.phone,
+        reason: resolvedStatus !== "ACTIVE" ? `Status ${resolvedStatus}.` : "Contato sem opt-in ativo.",
+        source: parsed.source || "manual"
+      });
+      await cancelQueuedCampaignDeliveries({
+        mandateId,
+        contactId: contact.id,
+        reason: "Contato salvo sem elegibilidade para envio."
+      });
+    }
+    invalidateContactOperationalCache(mandateId);
 
     return apiSuccess({
       contact: serializeContact(contact),

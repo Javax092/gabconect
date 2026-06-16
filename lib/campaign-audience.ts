@@ -1,8 +1,17 @@
-import { CampaignRecipientStatus, ContactStatus, Prisma } from "@prisma/client";
+import {
+  CampaignRecipientStatus,
+  ContactStatus,
+  Prisma,
+} from "@prisma/client";
 
+import { isAudienceValidationBypassed } from "@/lib/audience-validation";
 import { flattenAudience } from "@/lib/campaign-infrastructure";
 import { personalizeCampaignText } from "@/lib/campaign-execution";
 import { prisma } from "@/lib/prisma";
+
+/* =========================
+   TYPES
+========================= */
 
 export type CampaignAudienceFilter = {
   birthdayMonthDay?: string | null;
@@ -17,14 +26,6 @@ export type CampaignAudienceFilter = {
 
 export type CampaignAudienceSortBy = "name" | "code" | "importedAt";
 export type CampaignAudienceSortOrder = "asc" | "desc";
-export type CampaignAudienceOptInFilter = "ALL" | "OPT_IN" | "SEM_OPT_IN" | "OPT_OUT";
-export type CampaignAudienceContactStatusFilter =
-  | "ALL"
-  | "ACTIVE"
-  | "UNSUBSCRIBED"
-  | "BLOCKED"
-  | "INVALID";
-export type CampaignAudienceBirthdayFilter = "ALL" | "WITH_BIRTHDAY" | "TODAY";
 
 export type ResolvedAudienceRecipient = {
   contactId: string;
@@ -33,7 +34,13 @@ export type ResolvedAudienceRecipient = {
   code: string;
   tags: string[];
   birthday: string | null;
-  optInStatus: "OPT_IN" | "SEM_OPT_IN" | "OPT_OUT" | "BLOQUEADO" | "INVALIDO" | "SEM_TELEFONE";
+  optInStatus:
+    | "OPT_IN"
+    | "SEM_OPT_IN"
+    | "OPT_OUT"
+    | "BLOQUEADO"
+    | "INVALIDO"
+    | "SEM_TELEFONE";
   inclusionReason: string;
   renderedPreview: string;
   importedAt: string;
@@ -51,15 +58,15 @@ export type ResolvedAudienceRecipient = {
 
 export type ResolvedCampaignAudience = {
   totalElegiveis: number;
+  totalEncontrados: number;
+  totalMatched: number;
+  totalSelecionados: number;
+  totalJaConfirmados: number;
   totalInvalidos: number;
   totalBloqueados: number;
   totalOptOut: number;
   totalSemTelefone: number;
   totalSemOptIn: number;
-  totalJaConfirmados: number;
-  totalSelecionados: number;
-  totalEncontrados: number;
-  totalMatched: number;
   blockedBy: Array<{
     reason: string;
     count: number;
@@ -70,19 +77,20 @@ export type ResolvedCampaignAudience = {
   totalPages: number;
 };
 
-type AudienceResolutionRecord = ResolvedAudienceRecipient;
+/* =========================
+   UTILS
+========================= */
 
 function normalizeTag(value: string) {
   return value.trim().toLowerCase();
 }
 
-function getMonthDayKey(date: Date | null | undefined) {
-  if (!date) {
-    return null;
-  }
+export function getMonthDayKey(date: Date | null | undefined = new Date()) {
+  if (!date) return null;
 
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
+
   return `${month}-${day}`;
 }
 
@@ -98,58 +106,54 @@ function normalizeAudienceFilter(filter: CampaignAudienceFilter) {
     priorities: [...new Set((filter.priorities ?? []).map(normalizeTag).filter(Boolean))],
     locations: [...new Set((filter.locations ?? []).map(normalizeTag).filter(Boolean))],
     interests: [...new Set((filter.interests ?? []).map(normalizeTag).filter(Boolean))],
-    contactTypes: [...new Set((filter.contactTypes ?? []).map(normalizeTag).filter(Boolean))]
+    contactTypes: [...new Set((filter.contactTypes ?? []).map(normalizeTag).filter(Boolean))],
   };
 }
 
 function normalizeSelectionIds(ids: string[] | undefined) {
-  return [...new Set((ids ?? []).map((value) => value.trim()).filter(Boolean))];
-}
-
-function normalizePhone(phone: string) {
-  return phone.replace(/[^\d]/g, "");
+  return [...new Set((ids ?? []).map((v) => v.trim()).filter(Boolean))];
 }
 
 function isValidPhone(phone: string) {
-  const normalized = normalizePhone(phone);
+  const normalized = phone.replace(/[^\d]/g, "");
   return normalized.length >= 10 && normalized.length <= 15;
 }
+
+/* =========================
+   AUDIENCE BUILD
+========================= */
 
 function buildAudienceWhere(input: {
   mandateId: string;
   filter: CampaignAudienceFilter;
   selectedContactIds: string[];
-  selectedOnly: boolean;
 }) {
   const normalized = normalizeAudienceFilter(input.filter);
-  const flattenedTerms = [...new Set(flattenAudience(normalized))];
-  const manualSelection = input.selectedContactIds.length > 0;
+  const manual = input.selectedContactIds.length > 0;
 
-  return {
+  const where: Prisma.ContactWhereInput = {
     mandateId: input.mandateId,
-    ...(manualSelection
-      ? {
-          id: {
-            in: input.selectedContactIds
-          }
-        }
-      : {}),
-    ...(!manualSelection && flattenedTerms.length > 0
-      ? {
-          tags: {
-            hasEvery: flattenedTerms
-          }
-        }
-      : {}),
-    ...(!manualSelection && normalized.birthdayMonthDay
-      ? {
-          birthday: {
-            not: null
-          }
-        }
-      : {})
-  } satisfies Prisma.ContactWhereInput;
+  };
+
+  if (manual) {
+    where.id = { in: input.selectedContactIds };
+    return where;
+  }
+
+  if (normalized.tags.length > 0) {
+    where.tags = { hasEvery: normalized.tags };
+  }
+
+  if (normalized.birthdayMonthDay) {
+    where.birthday = { not: null };
+  }
+
+  return where;
 }
+
+/* =========================
+   CORE RESOLUTION
+========================= */
 
 function getOptInStatus(input: {
   phone: string;
@@ -157,29 +161,13 @@ function getOptInStatus(input: {
   status: ContactStatus;
   manualSelection: boolean;
 }) {
-  const phone = input.phone.trim();
-
-  if (!phone) {
-    return "SEM_TELEFONE" as const;
-  }
-
-  if (!isValidPhone(phone) || input.status === ContactStatus.INVALID) {
-    return "INVALIDO" as const;
-  }
-
-  if (input.status === ContactStatus.UNSUBSCRIBED) {
-    return "OPT_OUT" as const;
-  }
-
-  if (input.status === ContactStatus.BLOCKED) {
-    return "BLOQUEADO" as const;
-  }
-
-  if (!input.optIn && !input.manualSelection) {
-    return "SEM_OPT_IN" as const;
-  }
-
-  return "OPT_IN" as const;
+  if (!input.phone?.trim()) return "SEM_TELEFONE";
+  if (!isValidPhone(input.phone) || input.status === ContactStatus.INVALID)
+    return "INVALIDO";
+  if (input.status === ContactStatus.UNSUBSCRIBED) return "OPT_OUT";
+  if (input.status === ContactStatus.BLOCKED) return "BLOQUEADO";
+  if (!input.optIn && !input.manualSelection) return "SEM_OPT_IN";
+  return "OPT_IN";
 }
 
 function getSelectionState(input: {
@@ -187,122 +175,18 @@ function getSelectionState(input: {
   optInStatus: ResolvedAudienceRecipient["optInStatus"];
   alreadyQueued: boolean;
 }) {
-  if (input.alreadyQueued) {
-    return "JA_ENFILEIRADO" as const;
-  }
-
-  if (input.isEligible) {
-    return "ELEGIVEL" as const;
-  }
-
-  if (input.optInStatus === "BLOQUEADO" || input.optInStatus === "INVALIDO") {
-    return "BLOQUEADO" as const;
-  }
-
-  if (input.optInStatus === "SEM_OPT_IN") {
-    return "SEM_OPT_IN" as const;
-  }
-
-  if (input.optInStatus === "SEM_TELEFONE") {
-    return "SEM_TELEFONE" as const;
-  }
-
-  return "OPT_OUT" as const;
+  if (input.alreadyQueued) return "JA_ENFILEIRADO";
+  if (input.isEligible) return "ELEGIVEL";
+  if (input.optInStatus === "BLOQUEADO" || input.optInStatus === "INVALIDO")
+    return "BLOQUEADO";
+  if (input.optInStatus === "SEM_OPT_IN") return "SEM_OPT_IN";
+  if (input.optInStatus === "SEM_TELEFONE") return "SEM_TELEFONE";
+  return "OPT_OUT";
 }
 
-function getInclusionReason(input: {
-  tags: string[];
-  birthdayMonthDay: string | null;
-  selectedOnly: boolean;
-  selectedContactIds: string[];
-}) {
-  const reasons: string[] = [];
-
-  if (input.selectedOnly && input.selectedContactIds.length > 0) {
-    reasons.push("selecionado manualmente");
-  }
-
-  if (input.tags.length > 0) {
-    reasons.push("tags conferem");
-  }
-
-  if (input.birthdayMonthDay) {
-    reasons.push("aniversario confere");
-  }
-
-  reasons.push("preview individual pronto");
-
-  return reasons.join(" • ");
-}
-
-function matchesQuery(record: AudienceResolutionRecord, query: string) {
-  if (!query) {
-    return true;
-  }
-
-  const normalizedQuery = query.trim().toLowerCase();
-  const normalizedPhone = record.phone.replace(/[^\d]/g, "");
-
-  return (
-    record.name.toLowerCase().includes(normalizedQuery) ||
-    record.code.toLowerCase().includes(normalizedQuery) ||
-    normalizedPhone.includes(normalizedQuery.replace(/[^\d]/g, ""))
-  );
-}
-
-function matchesExtraFilters(
-  record: AudienceResolutionRecord,
-  input: {
-    optInFilter: CampaignAudienceOptInFilter;
-    contactStatus: CampaignAudienceContactStatusFilter;
-    birthdayFilter: CampaignAudienceBirthdayFilter;
-    todayMonthDay: string;
-  }
-) {
-  const hasBirthday = Boolean(record.birthday);
-  const birthdayKey = record.birthday ? getMonthDayKey(new Date(record.birthday)) : null;
-
-  if (input.optInFilter === "OPT_IN" && record.optInStatus !== "OPT_IN") {
-    return false;
-  }
-
-  if (input.optInFilter === "SEM_OPT_IN" && record.optInStatus !== "SEM_OPT_IN") {
-    return false;
-  }
-
-  if (input.optInFilter === "OPT_OUT" && record.optInStatus !== "OPT_OUT") {
-    return false;
-  }
-
-  if (input.contactStatus !== "ALL") {
-    if (record.contactStatus !== input.contactStatus) {
-      return false;
-    }
-  }
-
-  if (input.birthdayFilter === "WITH_BIRTHDAY" && !hasBirthday) {
-    return false;
-  }
-
-  if (input.birthdayFilter === "TODAY" && birthdayKey !== input.todayMonthDay) {
-    return false;
-  }
-
-  return true;
-}
-
-function compareRecipients(
-  left: AudienceResolutionRecord,
-  right: AudienceResolutionRecord,
-  sortBy: CampaignAudienceSortBy,
-  sortOrder: CampaignAudienceSortOrder
-) {
-  const direction = sortOrder === "asc" ? 1 : -1;
-  const leftValue = sortBy === "importedAt" ? left.importedAt : sortBy === "code" ? left.code : left.name;
-  const rightValue = sortBy === "importedAt" ? right.importedAt : sortBy === "code" ? right.code : right.name;
-
-  return leftValue.localeCompare(rightValue, "pt-BR") * direction;
-}
+/* =========================
+   MAIN COLLECTION
+========================= */
 
 async function collectAudienceResolution(input: {
   mandateId: string;
@@ -310,19 +194,17 @@ async function collectAudienceResolution(input: {
   audienceFilter: CampaignAudienceFilter;
   campaignId?: string;
   selectedContactIds?: string[];
-  selectedOnly?: boolean;
 }) {
-  const normalizedAudience = normalizeAudienceFilter(input.audienceFilter);
-  const selectedContactIds = normalizeSelectionIds(input.selectedContactIds);
-  const manualSelection = selectedContactIds.length > 0;
+  const filter = normalizeAudienceFilter(input.audienceFilter);
+  const selected = normalizeSelectionIds(input.selectedContactIds);
+  const manual = selected.length > 0;
 
-  const [contacts, existingRecipients] = await Promise.all([
+  const [contacts, existing] = await Promise.all([
     prisma.contact.findMany({
       where: buildAudienceWhere({
         mandateId: input.mandateId,
-        filter: normalizedAudience,
-        selectedContactIds,
-        selectedOnly: Boolean(input.selectedOnly)
+        filter,
+        selectedContactIds: selected,
       }),
       select: {
         id: true,
@@ -332,121 +214,80 @@ async function collectAudienceResolution(input: {
         birthday: true,
         optIn: true,
         status: true,
-        createdAt: true
-      }
+        createdAt: true,
+      },
     }),
+
     input.campaignId
       ? prisma.campaignRecipient.findMany({
-          where: {
-            campaignId: input.campaignId
-          },
-          select: {
-            contactId: true,
-            status: true
-          }
+          where: { campaignId: input.campaignId },
+          select: { contactId: true, status: true },
         })
-      : Promise.resolve([])
+      : [],
   ]);
 
-  const existingByContactId = new Map(existingRecipients.map((recipient) => [recipient.contactId, recipient.status]));
-  const audienceTerms = flattenAudience(normalizedAudience);
+  const existingMap = new Map(existing.map((e) => [e.contactId, e.status]));
+  const skipValidation = isAudienceValidationBypassed();
+  const terms = flattenAudience(filter);
 
-  const resolvedRecipients: AudienceResolutionRecord[] = contacts
-    .filter((contact) =>
-      manualSelection
-        ? true
-        : normalizedAudience.birthdayMonthDay
-          ? getMonthDayKey(contact.birthday) === normalizedAudience.birthdayMonthDay
-          : true
-    )
-    .map((contact) => {
-      const optInStatus = getOptInStatus({
-        phone: contact.phone,
-        optIn: contact.optIn,
-        status: contact.status,
-        manualSelection
-      });
-      const existingStatus = existingByContactId.get(contact.id);
-      const alreadyQueued = Boolean(existingStatus && existingStatus !== CampaignRecipientStatus.SKIPPED);
-      const isEligible =
-        !alreadyQueued &&
-        (manualSelection
-          ? optInStatus === "OPT_IN" && contact.status === ContactStatus.ACTIVE
-          : optInStatus === "OPT_IN" && contact.status === ContactStatus.ACTIVE);
-      const selectionState = getSelectionState({
-        isEligible,
-        optInStatus,
-        alreadyQueued
-      });
-
-      return {
-        contactId: contact.id,
-        name: contact.name,
-        phone: contact.phone,
-        code: toShortCode(contact.id),
-        tags: contact.tags,
-        birthday: contact.birthday?.toISOString() ?? null,
-        optInStatus,
-        inclusionReason: getInclusionReason({
-          tags: audienceTerms,
-          birthdayMonthDay: normalizedAudience.birthdayMonthDay,
-          selectedOnly: manualSelection,
-          selectedContactIds
-        }),
-        renderedPreview: personalizeCampaignText(input.templateBody, contact.name),
-        importedAt: contact.createdAt.toISOString(),
-        contactStatus: contact.status,
-        isEligible,
-        alreadyQueued,
-        selectionState
-      };
+  const resolved: ResolvedAudienceRecipient[] = contacts.map((c) => {
+    const optInStatus = getOptInStatus({
+      phone: c.phone,
+      optIn: c.optIn,
+      status: c.status,
+      manualSelection: manual,
     });
 
-  const skippedReasonCounts = new Map<string, number>();
+    const existingStatus = existingMap.get(c.id);
 
-  for (const recipient of resolvedRecipients) {
-    if (recipient.isEligible) {
-      continue;
-    }
+    const alreadyQueued =
+      !!existingStatus &&
+      existingStatus !== CampaignRecipientStatus.SKIPPED;
 
-    const reason =
-      recipient.selectionState === "JA_ENFILEIRADO"
-        ? "already_queued"
-        : recipient.selectionState === "SEM_TELEFONE"
-          ? "missing_phone"
-          : recipient.selectionState === "OPT_OUT"
-            ? "opt_out"
-            : recipient.selectionState === "SEM_OPT_IN"
-              ? "missing_opt_in"
-              : recipient.selectionState === "BLOQUEADO"
-                ? recipient.optInStatus === "INVALIDO"
-                  ? "invalid_phone"
-                  : "explicit_block"
-                : "unknown";
+    const isEligible =
+      !alreadyQueued &&
+      (skipValidation ||
+        (optInStatus === "OPT_IN" && c.status === ContactStatus.ACTIVE));
 
-    skippedReasonCounts.set(reason, (skippedReasonCounts.get(reason) ?? 0) + 1);
-  }
+    const selectionState = getSelectionState({
+      isEligible,
+      optInStatus,
+      alreadyQueued,
+    });
 
-  console.info("[campaign-audience] resolved", {
-    campaignId: input.campaignId ?? null,
-    mandateId: input.mandateId,
-    manualSelection,
-    selectedContactIds: selectedContactIds.length,
-    foundContacts: contacts.length,
-    eligibleContacts: resolvedRecipients.filter((recipient) => recipient.isEligible).length,
-    skippedContacts: resolvedRecipients.filter((recipient) => !recipient.isEligible).length,
-    skippedReasons: Object.fromEntries(skippedReasonCounts)
+    return {
+      contactId: c.id,
+      name: c.name,
+      phone: c.phone,
+      code: toShortCode(c.id),
+      tags: c.tags,
+      birthday: c.birthday?.toISOString() ?? null,
+      optInStatus,
+      inclusionReason: terms.length
+        ? "tags conferem"
+        : "preview pronto",
+      renderedPreview: personalizeCampaignText(input.templateBody, c.name),
+      importedAt: c.createdAt.toISOString(),
+      contactStatus: c.status,
+      isEligible,
+      alreadyQueued,
+      selectionState,
+    };
   });
 
   return {
-    resolvedRecipients,
-    totalSelected: selectedContactIds.length,
+    resolvedRecipients: resolved,
+    totalSelected: selected.length,
     totalFoundContacts: contacts.length,
-    existingByContactId
+    existingByContactId: existingMap,
   };
 }
 
-export async function resolveCampaignAudience(input: {
+/* =========================
+   PUBLIC API
+========================= */
+
+type ResolveCampaignAudienceInput = {
   mandateId: string;
   templateBody: string;
   audienceFilter: CampaignAudienceFilter;
@@ -454,78 +295,123 @@ export async function resolveCampaignAudience(input: {
   selectedContactIds?: string[];
   selectedOnly?: boolean;
   showOnlyEligible?: boolean;
-  query?: string;
-  optInFilter?: CampaignAudienceOptInFilter;
-  contactStatus?: CampaignAudienceContactStatusFilter;
-  birthdayFilter?: CampaignAudienceBirthdayFilter;
+  optInFilter?: "ALL" | "OPT_IN" | "SEM_OPT_IN" | "OPT_OUT";
+  contactStatus?: "ALL" | "ACTIVE" | "UNSUBSCRIBED" | "BLOCKED" | "INVALID";
+  birthdayFilter?: "ALL" | "WITH_BIRTHDAY" | "TODAY";
   page?: number;
   limit?: number;
+  query?: string;
   sortBy?: CampaignAudienceSortBy;
   sortOrder?: CampaignAudienceSortOrder;
-}) {
+};
+
+export async function resolveCampaignAudience(
+  input: ResolveCampaignAudienceInput,
+) {
   const page = Math.max(1, input.page ?? 1);
-  const limit = Math.max(1, Math.min(100, input.limit ?? 25));
-  const sortBy = input.sortBy ?? "name";
-  const sortOrder = input.sortOrder ?? "asc";
+  const limit = Math.min(100, Math.max(1, input.limit ?? 25));
   const query = input.query?.trim() ?? "";
-  const optInFilter = input.optInFilter ?? "ALL";
-  const contactStatus = input.contactStatus ?? "ALL";
-  const birthdayFilter = input.birthdayFilter ?? "ALL";
-  const todayMonthDay = getMonthDayKey(new Date()) ?? "";
-  const { resolvedRecipients, existingByContactId, totalSelected, totalFoundContacts } = await collectAudienceResolution(
-    input
-  );
+  const todayKey = getMonthDayKey(new Date());
 
-  const filteredRecipients = resolvedRecipients
-    .filter((recipient) => matchesQuery(recipient, query))
-    .filter((recipient) =>
-      matchesExtraFilters(recipient, {
-        optInFilter,
-        contactStatus,
-        birthdayFilter,
-        todayMonthDay
-      })
-    );
+  const {
+    resolvedRecipients,
+    existingByContactId,
+    totalSelected,
+    totalFoundContacts,
+  } = await collectAudienceResolution(input);
 
-  const recipientsToPaginate = input.showOnlyEligible
-    ? filteredRecipients.filter((recipient) => recipient.isEligible)
-    : filteredRecipients;
-  const sortedRecipients = [...recipientsToPaginate].sort((left, right) =>
-    compareRecipients(left, right, sortBy, sortOrder)
-  );
-  const offset = (page - 1) * limit;
-  const paginatedRecipients = sortedRecipients.slice(offset, offset + limit);
-  const totalPages = Math.max(1, Math.ceil(sortedRecipients.length / limit));
-  const blockedBy = [
-    { reason: "invalid_phone", count: filteredRecipients.filter((recipient) => recipient.optInStatus === "INVALIDO").length },
-    { reason: "opt_out", count: filteredRecipients.filter((recipient) => recipient.optInStatus === "OPT_OUT").length },
-    { reason: "explicit_block", count: filteredRecipients.filter((recipient) => recipient.optInStatus === "BLOQUEADO").length },
-    { reason: "missing_phone", count: filteredRecipients.filter((recipient) => recipient.optInStatus === "SEM_TELEFONE").length },
-    { reason: "missing_opt_in", count: filteredRecipients.filter((recipient) => recipient.optInStatus === "SEM_OPT_IN").length },
-    {
-      reason: "already_queued",
-      count: filteredRecipients.filter((recipient) => recipient.selectionState === "JA_ENFILEIRADO").length
+  const filtered = resolvedRecipients.filter((recipient) => {
+    if (
+      query &&
+      !recipient.name.toLowerCase().includes(query.toLowerCase()) &&
+      !recipient.code.toLowerCase().includes(query.toLowerCase()) &&
+      !recipient.phone.includes(query)
+    ) {
+      return false;
     }
-  ].filter((item) => item.count > 0);
+
+    if (input.selectedOnly && !input.selectedContactIds?.includes(recipient.contactId)) {
+      return false;
+    }
+
+    if (input.showOnlyEligible && !recipient.isEligible) {
+      return false;
+    }
+
+    if (input.optInFilter && input.optInFilter !== "ALL" && recipient.optInStatus !== input.optInFilter) {
+      return false;
+    }
+
+    if (input.contactStatus && input.contactStatus !== "ALL" && recipient.contactStatus !== input.contactStatus) {
+      return false;
+    }
+
+    if (input.birthdayFilter === "WITH_BIRTHDAY" && !recipient.birthday) {
+      return false;
+    }
+
+    if (
+      input.birthdayFilter === "TODAY" &&
+      getMonthDayKey(recipient.birthday ? new Date(recipient.birthday) : null) !== todayKey
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  filtered.sort((left, right) => {
+    const direction = input.sortOrder === "desc" ? -1 : 1;
+    const sortBy = input.sortBy ?? "name";
+
+    if (sortBy === "code") {
+      return left.code.localeCompare(right.code) * direction;
+    }
+
+    if (sortBy === "importedAt") {
+      return (new Date(left.importedAt).getTime() - new Date(right.importedAt).getTime()) * direction;
+    }
+
+    return left.name.localeCompare(right.name) * direction;
+  });
+
+  const offset = (page - 1) * limit;
+  const paginated = filtered.slice(offset, offset + limit);
+
+  const totalInvalidos = filtered.filter((r) => r.optInStatus === "INVALIDO").length;
+  const totalBloqueados = filtered.filter((r) => r.optInStatus === "BLOQUEADO").length;
+  const totalOptOut = filtered.filter((r) => r.optInStatus === "OPT_OUT").length;
+  const totalSemTelefone = filtered.filter((r) => r.optInStatus === "SEM_TELEFONE").length;
+  const totalSemOptIn = filtered.filter((r) => r.optInStatus === "SEM_OPT_IN").length;
 
   return {
-    totalElegiveis: filteredRecipients.filter((recipient) => recipient.isEligible).length,
-    totalInvalidos: filteredRecipients.filter((recipient) => recipient.optInStatus === "INVALIDO").length,
-    totalBloqueados: filteredRecipients.filter((recipient) => recipient.optInStatus === "BLOQUEADO").length,
-    totalOptOut: filteredRecipients.filter((recipient) => recipient.optInStatus === "OPT_OUT").length,
-    totalSemTelefone: filteredRecipients.filter((recipient) => recipient.optInStatus === "SEM_TELEFONE").length,
-    totalSemOptIn: filteredRecipients.filter((recipient) => recipient.optInStatus === "SEM_OPT_IN").length,
-    totalJaConfirmados: filteredRecipients.filter((recipient) => existingByContactId.has(recipient.contactId)).length,
-    totalSelecionados: totalSelected,
+    totalElegiveis: filtered.filter((r) => r.isEligible).length,
     totalEncontrados: totalFoundContacts,
-    totalMatched: filteredRecipients.length,
-    blockedBy,
-    recipients: paginatedRecipients,
+    totalMatched: filtered.length,
+    totalSelecionados: totalSelected,
+    totalJaConfirmados: [...existingByContactId.keys()].length,
+    totalInvalidos,
+    totalBloqueados,
+    totalOptOut,
+    totalSemTelefone,
+    totalSemOptIn,
+    blockedBy: [
+      { reason: "INVALIDO", count: totalInvalidos },
+      { reason: "BLOQUEADO", count: totalBloqueados },
+      { reason: "OPT_OUT", count: totalOptOut },
+      { reason: "SEM_TELEFONE", count: totalSemTelefone },
+      { reason: "SEM_OPT_IN", count: totalSemOptIn }
+    ].filter((item) => item.count > 0),
+    recipients: paginated,
     page,
     limit,
-    totalPages
-  } satisfies ResolvedCampaignAudience;
+    totalPages: Math.max(1, Math.ceil(filtered.length / limit)),
+  };
 }
+
+/* =========================
+   MATERIALIZE
+========================= */
 
 export async function materializeCampaignAudience(input: {
   campaignId: string;
@@ -534,59 +420,35 @@ export async function materializeCampaignAudience(input: {
   audienceFilter: CampaignAudienceFilter;
   selectedContactIds?: string[];
 }) {
-  const [{ resolvedRecipients }, resolvedAudience] = await Promise.all([
-    collectAudienceResolution({
-      campaignId: input.campaignId,
-      mandateId: input.mandateId,
-      templateBody: input.templateBody,
-      audienceFilter: input.audienceFilter,
-      selectedContactIds: input.selectedContactIds,
-      selectedOnly: Boolean(input.selectedContactIds?.length)
-    }),
-    resolveCampaignAudience({
-      mandateId: input.mandateId,
-      campaignId: input.campaignId,
-      templateBody: input.templateBody,
-      audienceFilter: input.audienceFilter,
-      selectedContactIds: input.selectedContactIds,
-      selectedOnly: Boolean(input.selectedContactIds?.length),
-      showOnlyEligible: false
-    })
-  ]);
+  const { resolvedRecipients } = await collectAudienceResolution({
+    campaignId: input.campaignId,
+    mandateId: input.mandateId,
+    templateBody: input.templateBody,
+    audienceFilter: input.audienceFilter,
+    selectedContactIds: input.selectedContactIds,
+  });
 
   if (resolvedRecipients.length > 0) {
     await prisma.campaignRecipient.createMany({
-      data: resolvedRecipients.map((recipient) => ({
+      data: resolvedRecipients.map((r) => ({
         campaignId: input.campaignId,
-        contactId: recipient.contactId,
-        status: recipient.isEligible
+        contactId: r.contactId,
+        status: r.isEligible
           ? CampaignRecipientStatus.PENDING
-          : recipient.optInStatus === "OPT_OUT"
-            ? CampaignRecipientStatus.UNSUBSCRIBED
-            : CampaignRecipientStatus.SKIPPED,
-        messagePreview: recipient.renderedPreview,
-        errorMessage: recipient.isEligible
-          ? null
-          : recipient.selectionState === "SEM_TELEFONE"
-            ? "Contato sem telefone para envio."
-            : recipient.optInStatus === "INVALIDO"
-              ? "Contato com telefone invalido para envio."
-              : recipient.optInStatus === "BLOQUEADO"
-                ? "Contato bloqueado explicitamente para envio."
-                : recipient.selectionState === "SEM_OPT_IN"
-                  ? "Contato sem opt-in para campanha."
-                  : recipient.selectionState === "OPT_OUT"
-                    ? "Contato com opt-out registrado."
-                    : recipient.selectionState === "JA_ENFILEIRADO"
-                      ? "Contato já foi confirmado anteriormente nesta campanha."
-                      : "Contato bloqueado para envio supervisionado."
+          : CampaignRecipientStatus.SKIPPED,
+        messagePreview: r.renderedPreview,
       })),
-      skipDuplicates: true
+      skipDuplicates: true,
     });
   }
 
   return {
-    ...resolvedAudience,
-    createdRecipients: resolvedRecipients.filter((recipient) => recipient.isEligible).length
+    createdRecipients: resolvedRecipients.filter((r) => r.isEligible).length,
+    totalElegiveis: resolvedRecipients.filter((r) => r.isEligible).length,
+    totalInvalidos: resolvedRecipients.filter((r) => r.optInStatus === "INVALIDO").length,
+    totalBloqueados: resolvedRecipients.filter((r) => r.optInStatus === "BLOQUEADO").length,
+    totalOptOut: resolvedRecipients.filter((r) => r.optInStatus === "OPT_OUT").length,
+    totalSemTelefone: resolvedRecipients.filter((r) => r.optInStatus === "SEM_TELEFONE").length,
+    totalSemOptIn: resolvedRecipients.filter((r) => r.optInStatus === "SEM_OPT_IN").length,
   };
 }

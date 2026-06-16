@@ -4,72 +4,72 @@ import {
   ContactStatus,
   Prisma,
   WhatsAppMessageLogStatus,
-  WhatsAppTemplateStatus
+  WhatsAppTemplateStatus,
 } from "@prisma/client";
 
+import {
+  extractOptOutKeyword as extractCentralOptOutKeyword,
+  registerOptOut,
+} from "@/lib/consent";
+import { isAudienceValidationBypassed } from "@/lib/audience-validation";
 import { materializeCampaignAudience } from "@/lib/campaign-audience";
 import { prisma } from "@/lib/prisma";
-import { DEFAULT_CAMPAIGN_SETTINGS, getCampaignSettings } from "@/lib/campaign-settings";
-
-const WHATSAPP_GRAPH_VERSION = "v23.0";
-const OPT_OUT_KEYWORDS = ["SAIR", "PARAR", "CANCELAR", "STOP"] as const;
-const ACTIVE_CAMPAIGN_STATUSES: CampaignStatus[] = ["DRAFT", "SCHEDULED", "RUNNING", "PAUSED"];
-
-function getWhatsAppConfig() {
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-
-  if (!accessToken || !phoneNumberId) {
-    throw new Error(
-      "Configuração do WhatsApp ausente: defina WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID."
-    );
-  }
-
-  return { accessToken, phoneNumberId };
-}
+import {
+  DEFAULT_CAMPAIGN_SETTINGS,
+  getCampaignSettings,
+} from "@/lib/campaign-settings";
+import { redactPhone } from "@/lib/security";
+import {
+  WhatsAppApiError,
+  buildWhatsAppTemplateComponents,
+  sendWhatsAppTemplateRequest,
+  validateMetaWhatsAppTemplate,
+} from "@/lib/whatsapp";
+import {
+  TEMPLATE_NOT_APPROVED,
+  validateApprovedTemplateForRealSend,
+} from "@/lib/whatsapp/templates";
 
 export function normalizePhone(phone: string) {
   return phone.replace(/[^\d]/g, "");
 }
 
-function normalizeKeywordText(text: string) {
-  return text
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase()
-    .trim();
-}
-
 export function extractOptOutKeyword(text: string) {
-  const normalized = normalizeKeywordText(text);
-
-  return (
-    OPT_OUT_KEYWORDS.find((keyword) =>
-      normalized.split(/\s+/).some((token) => token === keyword)
-    ) ?? null
-  );
+  return extractCentralOptOutKeyword(text);
 }
 
-export function getEligibleContactWhere(mandateId: string, tags: string[]): Prisma.ContactWhereInput {
-  const normalizedTags = [...new Set(tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+export function getEligibleContactWhere(
+  mandateId: string,
+  tags: string[],
+): Prisma.ContactWhereInput {
+  const normalizedTags = [
+    ...new Set(tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean)),
+  ];
+  const skipAudienceValidation = isAudienceValidationBypassed();
 
   return {
     mandateId,
-    optIn: true,
-    status: ContactStatus.ACTIVE,
+    // Original audience validation is preserved here and re-enabled by setting
+    // SKIP_AUDIENCE_VALIDATION=false.
+    ...(skipAudienceValidation
+      ? {}
+      : {
+          optIn: true,
+          status: ContactStatus.ACTIVE,
+        }),
     ...(normalizedTags.length > 0
       ? {
           tags: {
-            hasEvery: normalizedTags
-          }
+            hasEvery: normalizedTags,
+          },
         }
-      : {})
+      : {}),
   };
 }
 
 export async function countEligibleContacts(mandateId: string, tags: string[]) {
   return prisma.contact.count({
-    where: getEligibleContactWhere(mandateId, tags)
+    where: getEligibleContactWhere(mandateId, tags),
   });
 }
 
@@ -77,24 +77,26 @@ export async function syncCampaignCounters(campaignId: string) {
   const groups = await prisma.campaignRecipient.groupBy({
     by: ["status"],
     where: {
-      campaignId
+      campaignId,
     },
     _count: {
-      _all: true
-    }
+      _all: true,
+    },
   });
 
   const sentCount =
-    groups.find((group) => group.status === CampaignRecipientStatus.SENT)?._count._all ?? 0;
+    groups.find((group) => group.status === CampaignRecipientStatus.SENT)
+      ?._count._all ?? 0;
   const failedCount =
-    groups.find((group) => group.status === CampaignRecipientStatus.FAILED)?._count._all ?? 0;
+    groups.find((group) => group.status === CampaignRecipientStatus.FAILED)
+      ?._count._all ?? 0;
 
   return prisma.campaign.update({
     where: { id: campaignId },
     data: {
       sentCount,
-      failedCount
-    }
+      failedCount,
+    },
   });
 }
 
@@ -115,29 +117,30 @@ export async function createCampaignRecipients(
       contactTypes?: string[];
       selectedContactIds?: string[];
     };
-  }
+  },
 ) {
   const audience = await prisma.campaignAudienceConfig.findUnique({
     where: {
-      campaignId
-    }
+      campaignId,
+    },
   });
   const audienceFilter = options?.audienceFilter ?? {
-    birthdayMonthDay: options?.birthdayMonthDay ?? audience?.birthdayMonthDay ?? null,
-      tags: audience?.tags ?? tags,
-      groups: audience?.groups ?? [],
-      priorities: audience?.priorities ?? [],
-      locations: audience?.locations ?? [],
-      interests: audience?.interests ?? [],
-      contactTypes: audience?.contactTypes ?? [],
-      selectedContactIds: audience?.selectedContactIds ?? []
-    };
+    birthdayMonthDay:
+      options?.birthdayMonthDay ?? audience?.birthdayMonthDay ?? null,
+    tags: audience?.tags ?? tags,
+    groups: audience?.groups ?? [],
+    priorities: audience?.priorities ?? [],
+    locations: audience?.locations ?? [],
+    interests: audience?.interests ?? [],
+    contactTypes: audience?.contactTypes ?? [],
+    selectedContactIds: audience?.selectedContactIds ?? [],
+  };
   const materialized = await materializeCampaignAudience({
     campaignId,
     mandateId,
     templateBody: options?.templateBody ?? "",
     audienceFilter,
-    selectedContactIds: audienceFilter.selectedContactIds ?? []
+    selectedContactIds: audienceFilter.selectedContactIds ?? [],
   });
 
   return {
@@ -147,18 +150,18 @@ export async function createCampaignRecipients(
     totalBloqueados: materialized.totalBloqueados,
     totalOptOut: materialized.totalOptOut,
     totalSemTelefone: materialized.totalSemTelefone,
-    totalSemOptIn: materialized.totalSemOptIn
+    totalSemOptIn: materialized.totalSemOptIn,
   };
 }
 
 export async function shouldPauseCampaignAfterFailure(campaignId: string) {
   const campaign = await prisma.campaign.findUnique({
     where: {
-      id: campaignId
+      id: campaignId,
     },
     select: {
-      mandateId: true
-    }
+      mandateId: true,
+    },
   });
 
   if (!campaign) {
@@ -166,44 +169,77 @@ export async function shouldPauseCampaignAfterFailure(campaignId: string) {
   }
 
   const settings = await getCampaignSettings(campaign.mandateId);
-  const take = settings.maxConsecutiveFailures ?? DEFAULT_CAMPAIGN_SETTINGS.maxConsecutiveFailures;
+  const take =
+    settings.maxConsecutiveFailures ??
+    DEFAULT_CAMPAIGN_SETTINGS.maxConsecutiveFailures;
   const latestRecipients = await prisma.campaignRecipient.findMany({
     where: {
       campaignId,
       status: {
-        in: [CampaignRecipientStatus.SENT, CampaignRecipientStatus.FAILED]
-      }
+        in: [CampaignRecipientStatus.SENT, CampaignRecipientStatus.FAILED],
+      },
     },
     orderBy: {
-      updatedAt: "desc"
+      updatedAt: "desc",
     },
     take,
     select: {
-      status: true
-    }
+      status: true,
+    },
   });
 
-  return latestRecipients.length === take &&
-    latestRecipients.every((recipient) => recipient.status === CampaignRecipientStatus.FAILED);
+  return (
+    latestRecipients.length === take &&
+    latestRecipients.every(
+      (recipient) => recipient.status === CampaignRecipientStatus.FAILED,
+    )
+  );
 }
 
 export async function markCampaignCompletedIfFinished(campaignId: string) {
-  const pendingCount = await prisma.campaignRecipient.count({
-    where: {
-      campaignId,
-      status: CampaignRecipientStatus.PENDING
-    }
-  });
+  const [pendingCount, statusGroups] = await Promise.all([
+    prisma.campaignRecipient.count({
+      where: {
+        campaignId,
+        status: {
+          in: [
+            CampaignRecipientStatus.PENDING,
+            CampaignRecipientStatus.PROCESSING,
+            CampaignRecipientStatus.QUEUED,
+          ],
+        },
+      },
+    }),
+    prisma.campaignRecipient.groupBy({
+      by: ["status"],
+      where: {
+        campaignId,
+      },
+      _count: {
+        _all: true,
+      },
+    }),
+  ]);
 
-  if (pendingCount > 0) {
+  const sentCount =
+    statusGroups.find((group) => group.status === CampaignRecipientStatus.SENT)
+      ?._count._all ?? 0;
+  const totalRecipients = statusGroups.reduce(
+    (total, group) => total + group._count._all,
+    0,
+  );
+
+  if (pendingCount > 0 || totalRecipients === 0) {
     return null;
   }
 
   return prisma.campaign.update({
-    where: { id: campaignId },
+    where: {
+      id: campaignId,
+    },
     data: {
-      status: CampaignStatus.COMPLETED
-    }
+      status: sentCount > 0 ? CampaignStatus.COMPLETED : CampaignStatus.FAILED,
+    },
   });
 }
 
@@ -225,10 +261,52 @@ export async function sendWhatsAppTemplateMessage(input: {
   };
 }) {
   if (input.template.status !== WhatsAppTemplateStatus.APPROVED) {
-    throw new Error("Somente templates aprovados podem ser usados em campanhas.");
+    throw new Error(
+      "Somente templates aprovados podem ser usados em campanhas.",
+    );
   }
 
-  const { accessToken, phoneNumberId } = getWhatsAppConfig();
+  const approvedTemplateValidation = validateApprovedTemplateForRealSend(
+    input.template.metaTemplateName,
+  );
+
+  if (!approvedTemplateValidation.allowed) {
+    throw new WhatsAppApiError(
+      approvedTemplateValidation.message ?? "Template não aprovado na Meta.",
+      {
+        status: 400,
+        retryable: false,
+        details: {
+          code: TEMPLATE_NOT_APPROVED,
+          templateName: input.template.metaTemplateName,
+          suggestion: "Use hello_world em ambiente de teste.",
+        },
+      },
+    );
+  }
+
+  const metaValidation = await validateMetaWhatsAppTemplate({
+    templateName: input.template.metaTemplateName,
+    language: input.template.language,
+    localBody: input.template.body,
+  });
+
+  if (!metaValidation.ok) {
+    throw new WhatsAppApiError("Template inválido para envio pelo WhatsApp Cloud API.", {
+      status: 409,
+      retryable: false,
+      details: metaValidation.details,
+    });
+  }
+
+  const components = buildWhatsAppTemplateComponents({
+    localBody: input.template.body,
+    metaTemplate: metaValidation.metaTemplate,
+    contact: {
+      name: input.contact.name,
+    },
+  });
+
   const payload = {
     messaging_product: "whatsapp",
     recipient_type: "individual",
@@ -237,32 +315,28 @@ export async function sendWhatsAppTemplateMessage(input: {
     template: {
       name: input.template.metaTemplateName,
       language: {
-        code: input.template.language
-      }
-    }
+        code: input.template.language,
+      },
+      ...(components?.length ? { components } : {}),
+    },
   };
 
-  const response = await fetch(
-    `https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${phoneNumberId}/messages`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    }
-  );
+  let delivery: Awaited<ReturnType<typeof sendWhatsAppTemplateRequest>>;
 
-  const data = (await response.json().catch(() => null)) as
-    | {
-        messages?: Array<{ id?: string }>;
-        error?: { message?: string; code?: number };
-      }
-    | null;
-
-  if (!response.ok) {
-    const errorMessage = data?.error?.message ?? "Falha ao enviar template pelo WhatsApp.";
+  try {
+    delivery = await sendWhatsAppTemplateRequest({
+      phone: input.contact.phone,
+      templateName: input.template.metaTemplateName,
+      language: input.template.language,
+      components,
+    });
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : "Falha ao enviar template pelo WhatsApp.";
+    const retryable =
+      error instanceof WhatsAppApiError ? error.retryable : true;
 
     await prisma.whatsAppMessageLog.create({
       data: {
@@ -276,17 +350,28 @@ export async function sendWhatsAppTemplateMessage(input: {
         phone: input.contact.phone,
         errorMessage,
         payload: {
-          request: payload,
-          response: data
+          request: {
+            type: payload.type,
+            templateName: input.template.metaTemplateName,
+            language: input.template.language,
+            components,
+            phone: redactPhone(input.contact.phone),
+          },
+          response: null,
+          retryable,
         },
-        failedAt: new Date()
-      }
+        failedAt: new Date(),
+      },
     });
+
+    if (error instanceof WhatsAppApiError) {
+      throw error;
+    }
 
     throw new Error(errorMessage);
   }
 
-  const providerMessageId = data?.messages?.[0]?.id ?? null;
+  const providerMessageId = delivery.providerMessageId;
   const now = new Date();
 
   const log = await prisma.whatsAppMessageLog.create({
@@ -301,17 +386,25 @@ export async function sendWhatsAppTemplateMessage(input: {
       providerMessageId,
       phone: input.contact.phone,
       payload: {
-        request: payload,
-        response: data
+        request: {
+          type: payload.type,
+          templateName: input.template.metaTemplateName,
+          language: input.template.language,
+          components,
+          phone: redactPhone(input.contact.phone),
+        },
+        response: {
+          providerMessageId,
+        },
       },
-      sentAt: now
-    }
+      sentAt: now,
+    },
   });
 
   return {
     providerMessageId,
     sentAt: now,
-    logId: log.id
+    logId: log.id,
   };
 }
 
@@ -321,83 +414,41 @@ export async function registerContactOptOut(input: {
   name?: string | null;
   rawMessage: string;
   source?: string;
+  ipAddress?: string | null;
+  userId?: string | null;
 }) {
-  const keyword = extractOptOutKeyword(input.rawMessage);
+  const result = await registerOptOut({
+    mandateId: input.mandateId,
+    phone: input.phone,
+    name: input.name,
+    rawMessage: input.rawMessage,
+    source: input.source,
+    ipAddress: input.ipAddress ?? null,
+    userId: input.userId ?? null,
+  });
 
-  if (!keyword) {
+  if (!result) {
     return null;
   }
 
-  const phone = normalizePhone(input.phone);
-  const contact = await prisma.contact.upsert({
-    where: {
-      mandateId_phone: {
-        mandateId: input.mandateId,
-        phone
-      }
-    },
-    update: {
-      name: input.name?.trim() || undefined,
-      status: ContactStatus.UNSUBSCRIBED,
-      optIn: false,
-      optInAt: null
-    },
-    create: {
-      mandateId: input.mandateId,
-      name: input.name?.trim() || phone,
-      phone,
-      source: input.source ?? "WHATSAPP_WEBHOOK",
-      optIn: false,
-      optInAt: null,
-      status: ContactStatus.UNSUBSCRIBED,
-      tags: []
-    }
-  });
-
-  const optOutEvent = await prisma.optOutEvent.create({
+  await prisma.whatsAppMessageLog.create({
     data: {
       mandateId: input.mandateId,
-      contactId: contact.id,
-      keyword,
-      source: input.source ?? "WHATSAPP_WEBHOOK",
-      rawMessage: input.rawMessage
-    }
+      contactId: result.contact.id,
+      direction: "INBOUND",
+      status: WhatsAppMessageLogStatus.OPTED_OUT,
+      phone: normalizePhone(input.phone),
+      payload: {
+        keyword: result.keyword,
+      },
+    },
   });
 
-  await Promise.all([
-    prisma.campaignRecipient.updateMany({
-      where: {
-        contactId: contact.id,
-        status: CampaignRecipientStatus.PENDING,
-        campaign: {
-          status: {
-            in: ACTIVE_CAMPAIGN_STATUSES
-          }
-        }
-      },
-      data: {
-        status: CampaignRecipientStatus.UNSUBSCRIBED,
-        errorMessage: `Contato descadastrado via resposta "${keyword}".`
-      }
-    }),
-    prisma.whatsAppMessageLog.create({
-      data: {
-        mandateId: input.mandateId,
-        contactId: contact.id,
-        direction: "INBOUND",
-        status: WhatsAppMessageLogStatus.OPTED_OUT,
-        phone,
-        payload: {
-          keyword,
-          rawMessage: input.rawMessage
-        }
-      }
-    })
-  ]);
-
   return {
-    contact,
-    optOutEvent
+    contact: result.contact,
+    optOutEvent: result.optOutEvent,
+    suppression: result.suppression,
+    consentLog: result.consentLog,
   };
 }
 
@@ -409,18 +460,18 @@ export async function updateCampaignLogStatus(input: {
 }) {
   const log = await prisma.whatsAppMessageLog.findFirst({
     where: {
-      providerMessageId: input.providerMessageId
+      providerMessageId: input.providerMessageId,
     },
     orderBy: {
-      createdAt: "desc"
+      createdAt: "desc",
     },
     include: {
       campaignRecipient: {
         include: {
-          campaign: true
-        }
-      }
-    }
+          campaign: true,
+        },
+      },
+    },
   });
 
   if (!log) {
@@ -431,20 +482,23 @@ export async function updateCampaignLogStatus(input: {
     input.status === "sent"
       ? { status: WhatsAppMessageLogStatus.SENT, sentAt: input.timestamp }
       : input.status === "delivered"
-        ? { status: WhatsAppMessageLogStatus.DELIVERED, deliveredAt: input.timestamp }
+        ? {
+            status: WhatsAppMessageLogStatus.DELIVERED,
+            deliveredAt: input.timestamp,
+          }
         : input.status === "read"
           ? { status: WhatsAppMessageLogStatus.READ, readAt: input.timestamp }
           : {
               status: WhatsAppMessageLogStatus.FAILED,
               failedAt: input.timestamp,
-              errorMessage: input.failureReason ?? "Falha no envio."
+              errorMessage: input.failureReason ?? "Falha no envio.",
             };
 
   await prisma.whatsAppMessageLog.update({
     where: {
-      id: log.id
+      id: log.id,
     },
-    data
+    data,
   });
 
   if (
@@ -454,24 +508,26 @@ export async function updateCampaignLogStatus(input: {
   ) {
     await prisma.campaignRecipient.update({
       where: {
-        id: log.campaignRecipient.id
+        id: log.campaignRecipient.id,
       },
       data: {
         status: CampaignRecipientStatus.FAILED,
-        errorMessage: input.failureReason ?? "Falha no envio."
-      }
+        errorMessage: input.failureReason ?? "Falha no envio.",
+      },
     });
 
     await syncCampaignCounters(log.campaignRecipient.campaignId);
 
-    if (await shouldPauseCampaignAfterFailure(log.campaignRecipient.campaignId)) {
+    if (
+      await shouldPauseCampaignAfterFailure(log.campaignRecipient.campaignId)
+    ) {
       await prisma.campaign.update({
         where: {
-          id: log.campaignRecipient.campaignId
+          id: log.campaignRecipient.campaignId,
         },
         data: {
-          status: CampaignStatus.PAUSED
-        }
+          status: CampaignStatus.PAUSED,
+        },
       });
     }
   }

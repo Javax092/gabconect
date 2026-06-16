@@ -1,89 +1,58 @@
 import IORedis from "ioredis";
 
-type RedisState =
-  | { enabled: true; connection: IORedis }
-  | { enabled: false; reason: string };
+let redis: IORedis | null = null;
 
-let redisConnection: IORedis | null = null;
-
-function createRedisConnection() {
-  const redisUrl = process.env.REDIS_URL;
-
-  if (!redisUrl) {
-    return null;
+export function getRedisClient() {
+  if (!process.env.REDIS_URL) {
+    throw new Error("REDIS_URL ausente.");
   }
 
-  return new IORedis(redisUrl, {
-    maxRetriesPerRequest: null,
-    enableReadyCheck: true,
-    lazyConnect: true,
-    retryStrategy(times) {
-      return Math.min(times * 200, 5_000);
-    }
-  });
+  if (!redis) {
+    redis = new IORedis(process.env.REDIS_URL, {
+      maxRetriesPerRequest: 3,
+      enableReadyCheck: true,
+      lazyConnect: false,
+    });
+  }
+
+  return redis;
 }
+
+export type RedisState = {
+  enabled: boolean;
+  connected: boolean;
+  connection?: IORedis;
+  latencyMs?: number;
+  error?: string;
+};
 
 export async function getRedisState(): Promise<RedisState> {
   if (!process.env.REDIS_URL) {
     return {
       enabled: false,
-      reason: "REDIS_URL ausente. Em produção, Redis é obrigatório."
+      connected: false,
+      error: "REDIS_URL ausente.",
     };
   }
 
-  if (!redisConnection) {
-    redisConnection = createRedisConnection();
-  }
+  try {
+    const client = getRedisClient();
 
-  if (!redisConnection) {
-    return {
-      enabled: false,
-      reason: "Falha ao inicializar conexão Redis."
-    };
-  }
+    const start = Date.now();
+    await client.ping();
+    const latencyMs = Date.now() - start;
 
-  if (redisConnection.status === "ready") {
     return {
       enabled: true,
-      connection: redisConnection
+      connected: true,
+      connection: client,
+      latencyMs,
     };
-  }
-
-  try {
-    await redisConnection.connect();
-  } catch (error) {
+  } catch (err: unknown) {
     return {
-      enabled: false,
-      reason: error instanceof Error ? error.message : "Falha desconhecida na conexão Redis."
-    };
-  }
-
-  return {
-    enabled: true,
-    connection: redisConnection
-  };
-}
-
-export async function getRedisHealth() {
-  const state = await getRedisState();
-
-  if (!state.enabled) {
-    return {
-      status: "degraded" as const,
-      reason: state.reason
-    };
-  }
-
-  try {
-    await state.connection.ping();
-    return {
-      status: "ready" as const,
-      reason: "Redis conectado."
-    };
-  } catch (error) {
-    return {
-      status: "degraded" as const,
-      reason: error instanceof Error ? error.message : "Falha no ping Redis."
+      enabled: true,
+      connected: false,
+      error: err instanceof Error ? err.message : "unknown error",
     };
   }
 }

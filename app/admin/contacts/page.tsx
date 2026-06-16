@@ -44,6 +44,7 @@ export default async function ContactsPage() {
           code: contact.id.slice(-8).toUpperCase(),
           invalidPhone: !isValidPhone(contact.phone),
           birthday: contact.birthday?.toISOString() ?? null,
+          lastInteractionAt: contact.lastInteractionAt?.toISOString() ?? null,
           optInAt: contact.optInAt?.toISOString() ?? null,
           createdAt: contact.createdAt.toISOString(),
           updatedAt: contact.updatedAt.toISOString()

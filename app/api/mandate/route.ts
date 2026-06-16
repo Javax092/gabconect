@@ -1,5 +1,6 @@
 import { ApiRouteError, apiError, apiSuccess, readJson, validateSchema } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
+import { invalidateWhatsAppOperationalCache } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
 import { mandateSchema } from "@/lib/validations/mandate";
 
@@ -57,6 +58,7 @@ export async function PATCH(request: Request) {
         createdAt: true
       }
     });
+    invalidateWhatsAppOperationalCache(mandateId);
 
     return apiSuccess({
       message: "Configurações operacionais salvas com sucesso.",

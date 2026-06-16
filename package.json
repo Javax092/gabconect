@@ -9,6 +9,7 @@
     "clean": "rm -rf .next tsconfig.tsbuildinfo",
     "lint": "next lint",
     "typecheck": "npm run clean && next typegen && tsc --noEmit",
+    "test:send-gate": "node --import tsx tests/send-gate.test.ts",
     "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
@@ -29,11 +30,11 @@
     "node": ">=20.11 <23"
   },
   "dependencies": {
-    "@prisma/client": "^6.8.2",
+    "@prisma/client": "^6.19.3",
     "bcryptjs": "^3.0.2",
-    "bullmq": "^5.56.1",
+    "bullmq": "^5.78.1",
     "clsx": "^2.1.1",
-    "ioredis": "^5.6.1",
+    "ioredis": "^5.3.2",
     "jose": "^6.0.11",
     "lucide-react": "^0.511.0",
     "next": "^15.3.2",
@@ -43,15 +44,18 @@
     "zod": "^3.24.4"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.5",
     "@types/node": "^22.19.19",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "autoprefixer": "^10.4.21",
+    "dotenv-cli": "^11.0.0",
     "eslint": "^9.27.0",
     "eslint-config-next": "^15.5.18",
     "postcss": "^8.5.3",
     "prisma": "^6.8.2",
     "tailwindcss": "^3.4.17",
+    "ts-morph": "^28.0.0",
     "tsx": "^4.19.4",
     "typescript": "^5.9.3"
   }

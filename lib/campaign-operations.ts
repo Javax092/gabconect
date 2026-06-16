@@ -91,7 +91,13 @@ function buildRecipientWhere(
     case "pending":
       return {
         campaignId,
-        status: CampaignRecipientStatus.PENDING
+        status: {
+          in: [
+            CampaignRecipientStatus.PENDING,
+            CampaignRecipientStatus.PROCESSING,
+            CampaignRecipientStatus.QUEUED
+          ]
+        }
       };
     case "failed":
       return {
@@ -236,7 +242,10 @@ function deriveOperationalStatus(input: {
     return "OPTED_OUT";
   }
 
-  if (input.latestQueueStatus === QueueStatus.PROCESSING) {
+  if (
+    input.recipientStatus === CampaignRecipientStatus.PROCESSING ||
+    input.latestQueueStatus === QueueStatus.PROCESSING
+  ) {
     return "SENDING";
   }
 
@@ -466,7 +475,9 @@ export async function getCampaignOperationsView(input: {
   for (const row of recipientStatusGroups) {
     recipientCounts.total += row._count._all;
 
-    if (row.status === CampaignRecipientStatus.PENDING) recipientCounts.pending = row._count._all;
+    if (row.status === CampaignRecipientStatus.PENDING) recipientCounts.pending += row._count._all;
+    if (row.status === CampaignRecipientStatus.PROCESSING) recipientCounts.pending += row._count._all;
+    if (row.status === CampaignRecipientStatus.QUEUED) recipientCounts.pending += row._count._all;
     if (row.status === CampaignRecipientStatus.FAILED) recipientCounts.failed = row._count._all;
     if (row.status === CampaignRecipientStatus.SKIPPED) recipientCounts.skipped = row._count._all;
     if (row.status === CampaignRecipientStatus.UNSUBSCRIBED) recipientCounts.optOut = row._count._all;

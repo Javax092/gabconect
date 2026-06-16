@@ -1,24 +1,32 @@
+import dynamic from "next/dynamic";
 import Link from "next/link";
-import { Clock3, MessageSquareText, PlugZap, ShieldAlert, Users2, Waypoints } from "lucide-react";
+import { BrainCircuit, Cake, Megaphone, PlugZap, ShieldAlert, Star, Users2, Waypoints } from "lucide-react";
+import { CampaignStatus, WhatsAppMessageLogStatus } from "@prisma/client";
 
+import { DashboardDeferredSkeleton } from "@/components/admin/dashboard-deferred-skeleton";
+import { EmptyState } from "@/components/admin/empty-state";
+import { MetricCard } from "@/components/admin/metric-card";
+import { SectionCard } from "@/components/admin/section-card";
 import { buttonVariants } from "@/components/ui/button";
-import { DemoDashboardPage } from "@/components/demo/demo-pages";
 import { requireUser } from "@/lib/auth";
-import { bootstrapCampaignEvents, ensureCampaignInfrastructure, getInfrastructureSnapshot } from "@/lib/campaign-infrastructure";
 import { isDemoMode } from "@/lib/demo";
-import { getOperationalReadiness } from "@/lib/operational-readiness";
+import { getCachedAdminDashboardOverview } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
+import { getRelationshipHeatmap } from "@/lib/relationship-heatmap";
 
-function formatDateTime(value: Date | string | null) {
-  if (!value) {
-    return "Sem registro";
+const DemoDashboardPage = dynamic(() =>
+  import("@/components/demo/demo-pages").then((module) => module.DemoDashboardPage)
+);
+
+const DashboardDeferredBlocks = dynamic(
+  () =>
+    import("@/components/admin/dashboard-deferred-blocks").then(
+      (module) => module.DashboardDeferredBlocks
+    ),
+  {
+    loading: () => <DashboardDeferredSkeleton />
   }
-
-  return new Intl.DateTimeFormat("pt-BR", {
-    dateStyle: "short",
-    timeStyle: "short"
-  }).format(typeof value === "string" ? new Date(value) : value);
-}
+);
 
 export default async function AdminPage() {
   if (isDemoMode()) {
@@ -26,69 +34,93 @@ export default async function AdminPage() {
   }
 
   const user = await requireUser();
-  await ensureCampaignInfrastructure(user.mandateId, user.mandate.whatsappNumber);
-  await bootstrapCampaignEvents(user.mandateId);
-
-  const [readiness, ops, recentConversations, recentCompliance, activeCampaigns, humanPendings] = await Promise.all([
-    getOperationalReadiness(user.mandateId),
-    getInfrastructureSnapshot(user.mandateId, user.mandate.whatsappNumber),
-    prisma.conversation.findMany({
+  const [overview, contacts, activeCampaigns, sentMessages, awaitingCampaigns, heatmap] = await Promise.all([
+    getCachedAdminDashboardOverview(user.mandateId),
+    prisma.contact.findMany({
       where: { mandateId: user.mandateId },
-      include: {
-        citizen: true,
-        messages: {
-          orderBy: { createdAt: "desc" },
-          take: 1
-        }
-      },
-      orderBy: [{ humanPriority: "desc" }, { lastMessageAt: "desc" }],
-      take: 6
+      select: {
+        id: true,
+        name: true,
+        birthday: true,
+        influenceLevel: true,
+        relationshipStatus: true,
+        lastInteractionAt: true
+      }
     }),
-    prisma.complianceLog.findMany({
-      where: { mandateId: user.mandateId },
-      orderBy: { createdAt: "desc" },
-      take: 5
+    prisma.campaign.count({
+      where: {
+        mandateId: user.mandateId,
+        status: { in: [CampaignStatus.SCHEDULED, CampaignStatus.RUNNING, CampaignStatus.PAUSED] }
+      }
+    }),
+    prisma.whatsAppMessageLog.count({
+      where: {
+        mandateId: user.mandateId,
+        status: {
+          in: [
+            WhatsAppMessageLogStatus.SENT,
+            WhatsAppMessageLogStatus.DELIVERED,
+            WhatsAppMessageLogStatus.READ,
+            WhatsAppMessageLogStatus.SIMULATED_SENT
+          ]
+        }
+      }
     }),
     prisma.campaign.findMany({
       where: {
         mandateId: user.mandateId,
-        status: {
-          in: ["DRAFT", "SCHEDULED", "RUNNING", "PAUSED"]
-        }
+        status: { in: [CampaignStatus.DRAFT, CampaignStatus.SCHEDULED, CampaignStatus.PAUSED] }
       },
-      include: {
-        operationState: true,
-        template: true
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        createdAt: true
       },
       orderBy: { updatedAt: "desc" },
-      take: 5
+      take: 3
     }),
-    prisma.conversation.count({
-      where: {
-        mandateId: user.mandateId,
-        OR: [{ status: "HUMAN" }, { humanTakeoverActive: true }, { humanPriority: true }]
-      }
-    })
+    getRelationshipHeatmap(user.mandateId)
   ]);
+
+  const totalContacts = contacts.length;
+  const vipContacts = contacts.filter((contact) => contact.influenceLevel === "VIP").length;
+  const relationshipPendings = contacts.filter(
+    (contact) =>
+      contact.relationshipStatus === "INACTIVE" &&
+      (contact.influenceLevel === "VIP" || contact.influenceLevel === "HIGH")
+  ).length;
+  const criticalRegions = heatmap.filter((area) => area.heatScore >= 70).length;
+  const today = new Date();
+  const birthdays = contacts
+    .filter(
+      (contact) =>
+        contact.birthday &&
+        contact.birthday.getUTCDate() === today.getUTCDate() &&
+        contact.birthday.getUTCMonth() === today.getUTCMonth()
+    )
+    .slice(0, 3);
+  const highInfluenceContacts = contacts
+    .filter((contact) => contact.influenceLevel === "VIP" || contact.influenceLevel === "HIGH")
+    .slice(0, 3);
 
   return (
     <div className="space-y-6">
-      <section className="rounded-[32px] border border-cyan-400/15 bg-[linear-gradient(135deg,_rgba(8,15,29,0.96)_0%,_rgba(15,23,42,0.94)_60%,_rgba(14,116,144,0.18)_100%)] p-7 shadow-[0_24px_70px_rgba(3,7,18,0.45)]">
+      <section className="rounded-3xl border border-slate-200/80 bg-[radial-gradient(circle_at_top_right,_rgba(20,184,166,0.14),_transparent_28%),linear-gradient(135deg,_#ffffff_0%,_#f7fbff_58%,_#edf6ff_100%)] p-7 shadow-soft ring-1 ring-white/70">
         <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-300/80">
-              Central operacional
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-brand-700">
+              GabineteConectado
             </p>
-            <h1 className="mt-3 text-3xl font-semibold text-white">
-              Operação do WhatsApp pronta para revisão, fila e envio supervisionado.
+            <h1 className="mt-3 max-w-4xl text-3xl font-semibold tracking-tight text-slate-950">
+              CRM político para operar relacionamento, campanhas e atendimento com controle.
             </h1>
-            <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300">
-              Acompanhe status do canal, workers, campanhas ativas, conversas recentes,
-              pendências humanas e sinais de compliance em uma única visão.
+            <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600">
+              Visão executiva do mandato: contatos estratégicos, regiões prioritárias, operação de WhatsApp e pendências humanas em uma única central.
             </p>
             <div className="mt-5 flex flex-wrap gap-3">
               <Link href="/admin/campaigns" className={buttonVariants("primary")}>
-                Criar operação
+                Criar campanha
               </Link>
               <Link href="/admin/campaigns/operations" className={buttonVariants("secondary")}>
                 Acompanhar operação
@@ -100,165 +132,92 @@ export default async function AdminPage() {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <HeroPill label="Modo atual" value={readiness.mode === "SIMULACAO" ? "Modo simulação" : "Envio real"} />
-            <HeroPill label="Worker outgoing" value={readiness.outgoingWorkerReady ? "Online" : "Sem heartbeat"} />
+            <HeroPill label="Modo atual" value={overview.mode === "SIMULACAO" ? "Modo simulação" : "Envio real"} />
+            <HeroPill label="Worker outgoing" value={overview.outgoingWorkerReady ? "Online" : "Sem heartbeat"} />
           </div>
         </div>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Status WhatsApp" value={readiness.webhook.configured ? "Webhook pronto" : "Webhook pendente"} icon={<PlugZap className="h-5 w-5" />} />
-        <MetricCard label="Fila de envio" value={String(readiness.queueSummary.queued)} icon={<Waypoints className="h-5 w-5" />} />
-        <MetricCard label="Pendências humanas" value={String(humanPendings)} icon={<Users2 className="h-5 w-5" />} />
-        <MetricCard label="Risco atual" value={`${ops.metrics.spamProbability}%`} icon={<ShieldAlert className="h-5 w-5" />} />
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+        <MetricCard title="Contatos cadastrados" value={totalContacts} icon={<Users2 className="h-5 w-5" />} tone="blue" />
+        <MetricCard title="Campanhas ativas" value={activeCampaigns} icon={<Megaphone className="h-5 w-5" />} tone="teal" />
+        <MetricCard title="Mensagens enviadas" value={sentMessages} icon={<PlugZap className="h-5 w-5" />} tone="teal" />
+        <MetricCard title="Pendências" value={relationshipPendings} icon={<ShieldAlert className="h-5 w-5" />} tone="amber" />
+        <MetricCard title="Regiões críticas" value={criticalRegions} icon={<Waypoints className="h-5 w-5" />} tone="rose" />
+        <MetricCard title="Contatos VIP" value={vipContacts} icon={<Star className="h-5 w-5" />} tone="amber" />
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_380px]">
-        <div className="rounded-[28px] border border-white/10 bg-white/5 p-5">
-          <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-4">
-            <div>
-              <p className="text-sm font-semibold text-white">Conversas recentes</p>
-              <p className="mt-1 text-sm text-slate-400">Estado do atendimento, fila atual e risco percebido.</p>
-            </div>
-            <Link href="/admin/conversations" className="text-sm font-medium text-cyan-300">
-              Abrir central
-            </Link>
-          </div>
-
-          <div className="mt-4 space-y-3">
-            {recentConversations.map((conversation) => (
-              <Link
-                key={conversation.id}
-                href={`/admin/conversations/${conversation.id}`}
-                className="block rounded-[24px] border border-white/10 bg-slate-950/55 px-4 py-4 transition hover:border-cyan-400/30"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-medium text-white">{conversation.citizen.name}</p>
-                  <Badge>{conversation.status === "HUMAN" ? "Humano ativo" : "IA ativa"}</Badge>
-                  {conversation.humanPriority ? <Badge tone="amber">Pendência humana</Badge> : null}
-                  {conversation.riskScore >= 60 ? <Badge tone="rose">Risco elevado</Badge> : null}
-                </div>
-                <p className="mt-3 line-clamp-2 text-sm leading-6 text-slate-300">
-                  {conversation.messages[0]?.content ?? "Sem histórico recente."}
-                </p>
-                <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate-400">
-                  <span>Fila: {conversation.currentQueue}</span>
-                  <span>Última mensagem: {formatDateTime(conversation.lastMessageAt)}</span>
-                  <span>Janela Meta: {conversation.metaWindowOpen ? "aberta" : "encerrada"}</span>
-                </div>
-              </Link>
-            ))}
-          </div>
+      <SectionCard
+        title="Prioridades de hoje"
+        description="Sinais práticos para o gabinete decidir onde agir primeiro."
+      >
+        <div className="grid gap-4 xl:grid-cols-3">
+          <PriorityPanel
+            icon={<BrainCircuit className="h-5 w-5" />}
+            title="Relacionamento estratégico"
+            items={
+              relationshipPendings > 0
+                ? [`${relationshipPendings} lideranças ou VIPs estão inativos.`]
+                : ["Nenhuma liderança crítica inativa identificada agora."]
+            }
+          />
+          <PriorityPanel
+            icon={<Cake className="h-5 w-5" />}
+            title="Aniversariantes"
+            items={
+              birthdays.length > 0
+                ? birthdays.map((contact) => contact.name)
+                : ["Nenhum aniversariante encontrado para este mandato hoje."]
+            }
+          />
+          <PriorityPanel
+            icon={<Megaphone className="h-5 w-5" />}
+            title="Campanhas aguardando ação"
+            items={
+              awaitingCampaigns.length > 0
+                ? awaitingCampaigns.map((campaign) => `${campaign.name} · ${campaign.status}`)
+                : ["Nenhuma campanha aguardando ação imediata."]
+            }
+          />
         </div>
+        {highInfluenceContacts.length === 0 && totalContacts === 0 ? (
+          <div className="mt-4">
+            <EmptyState
+              title="Nenhum contato encontrado para este mandato ainda."
+              description="Cadastre contatos e registre papéis comunitários para liberar priorização inteligente no painel."
+            />
+          </div>
+        ) : null}
+      </SectionCard>
 
-        <div className="space-y-4">
-          <div className="rounded-[28px] border border-white/10 bg-white/5 p-5">
-            <div className="flex items-center gap-3">
-              <Clock3 className="h-5 w-5 text-cyan-300" />
-              <h2 className="text-lg font-semibold text-white">Status operacional</h2>
-            </div>
-            <div className="mt-4 space-y-3 text-sm text-slate-300">
-              <p>Modo atual: {readiness.mode === "SIMULACAO" ? "Modo simulação" : "Envio real"}</p>
-              <p>Redis: {readiness.queueHealth.redis}</p>
-              <p>Filas: {readiness.queueHealth.queues}</p>
-              <p>Outgoing worker: {readiness.outgoingWorkerReady ? "online" : "sem heartbeat recente"}</p>
-              <p>Último webhook: {formatDateTime(readiness.latestInboundMessage?.createdAt ?? null)}</p>
-              <p>Último envio: {formatDateTime(readiness.latestDelivery?.createdAt ?? null)}</p>
-            </div>
-          </div>
-
-          <div className="rounded-[28px] border border-white/10 bg-white/5 p-5">
-            <h2 className="text-lg font-semibold text-white">Campanhas ativas</h2>
-            <div className="mt-4 space-y-3">
-              {activeCampaigns.length === 0 ? (
-                <p className="text-sm text-slate-400">Nenhuma operação ativa no momento.</p>
-              ) : (
-                activeCampaigns.map((campaign) => (
-                  <div key={campaign.id} className="rounded-[22px] border border-white/10 bg-slate-950/55 px-4 py-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-medium text-white">{campaign.name}</p>
-                      <span className="text-xs text-slate-400">{campaign.status}</span>
-                    </div>
-                    <p className="mt-2 text-sm text-slate-300">{campaign.template.name}</p>
-                    <p className="mt-2 text-xs text-slate-500">
-                      Fila: {campaign.operationState?.pipelineStage ?? "sem estado"} • Risco {campaign.operationState?.riskScore ?? 0}
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="rounded-[28px] border border-white/10 bg-white/5 p-5">
-          <div className="flex items-center gap-3">
-            <ShieldAlert className="h-5 w-5 text-cyan-300" />
-            <h2 className="text-lg font-semibold text-white">Compliance e riscos</h2>
-          </div>
-          <div className="mt-4 space-y-3">
-            {recentCompliance.map((entry) => (
-              <div key={entry.id} className="rounded-[22px] border border-white/10 bg-slate-950/55 px-4 py-4">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-medium text-white">{entry.actionTaken}</p>
-                  <span className="text-xs text-slate-400">{formatDateTime(entry.createdAt)}</span>
-                </div>
-                <p className="mt-2 text-sm leading-6 text-slate-300">{entry.reason}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="rounded-[28px] border border-white/10 bg-white/5 p-5">
-          <div className="flex items-center gap-3">
-            <MessageSquareText className="h-5 w-5 text-cyan-300" />
-            <h2 className="text-lg font-semibold text-white">Checklist de prontidão</h2>
-          </div>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            {readiness.envChecklist.map((item) => (
-              <div key={item.key} className="rounded-[20px] border border-white/10 bg-slate-950/55 px-4 py-4">
-                <p className="text-sm font-medium text-white">{item.label}</p>
-                <p className="mt-1 text-sm text-slate-400">{item.status}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
+      <DashboardDeferredBlocks />
     </div>
-  );
-}
-
-function MetricCard({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
-  return (
-    <article className="rounded-[24px] border border-white/10 bg-white/5 p-5">
-      <div className="flex items-center gap-3 text-cyan-300">{icon}</div>
-      <p className="mt-3 text-sm text-slate-400">{label}</p>
-      <p className="mt-2 text-2xl font-semibold text-white">{value}</p>
-    </article>
   );
 }
 
 function HeroPill({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-[22px] border border-white/10 bg-white/[0.04] px-5 py-4">
-      <p className="text-xs uppercase tracking-[0.18em] text-slate-400">{label}</p>
-      <p className="mt-2 text-xl font-semibold text-white">{value}</p>
+    <div className="rounded-2xl border border-slate-200 bg-white/80 px-5 py-4 shadow-sm">
+      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">{label}</p>
+      <p className="mt-2 text-xl font-semibold text-slate-950">{value}</p>
     </div>
   );
 }
 
-function Badge({ children, tone = "slate" }: { children: React.ReactNode; tone?: "slate" | "amber" | "rose" }) {
-  const toneClass =
-    tone === "amber"
-      ? "border-amber-400/20 bg-amber-400/10 text-amber-200"
-      : tone === "rose"
-        ? "border-rose-400/20 bg-rose-400/10 text-rose-200"
-        : "border-white/10 bg-white/[0.05] text-slate-300";
-
+function PriorityPanel({ icon, title, items }: { icon: React.ReactNode; title: string; items: string[] }) {
   return (
-    <span className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${toneClass}`}>
-      {children}
-    </span>
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+      <div className="flex items-center gap-3 text-brand-700">
+        {icon}
+        <h3 className="font-semibold text-slate-950">{title}</h3>
+      </div>
+      <div className="mt-4 space-y-2">
+        {items.map((item) => (
+          <p key={item} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-600">
+            {item}
+          </p>
+        ))}
+      </div>
+    </div>
   );
 }

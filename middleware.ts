@@ -68,20 +68,21 @@ async function hasValidSessionToken(token: string) {
 }
 
 export async function middleware(request: NextRequest) {
-  const token = request.cookies.get(SESSION_COOKIE)?.value;
   const { pathname } = request.nextUrl;
+  const publicApiRoutes = [
+    "/api/webhooks/whatsapp",
+    "/api/whatsapp/webhook",
+    "/api/health"
+  ];
+
+  if (publicApiRoutes.some((path) => pathname.startsWith(path))) {
+    return NextResponse.next();
+  }
 
   const isProtectedRoute = pathname.startsWith("/admin");
   const isAuthRoute = pathname.startsWith("/login");
+  const token = request.cookies.get(SESSION_COOKIE)?.value;
   const hasValidToken = token ? await hasValidSessionToken(token) : false;
-
-  console.info("[middleware] requisicao", {
-    pathname,
-    cookieName: SESSION_COOKIE,
-    cookieStatus: token ? "present" : "missing",
-    tokenStatus: hasValidToken ? "valid" : "invalid_or_missing",
-    demoMode: isDemoModeEnabled()
-  });
 
   if (isProtectedRoute && !hasValidToken) {
     console.warn("[middleware] bloqueando acesso a rota protegida", {

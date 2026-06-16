@@ -9,7 +9,10 @@ import { getMandateContext, requireAuth } from "@/lib/auth";
 import { queueCampaignRecipients } from "@/lib/campaign-execution";
 import { appendCampaignEvent, syncCampaignOperationState } from "@/lib/campaign-infrastructure";
 import { assertRealSendInfrastructureReady } from "@/lib/operational-readiness";
+import { invalidateCampaignOperationalCache } from "@/lib/operational-cache";
 import { runCampaignSafetySimulation } from "@/lib/campaign-safety";
+import { isMassCampaignEnabled } from "@/lib/mass-campaign-config";
+import { assertRateLimit, getClientIp } from "@/lib/security";
 import { prisma } from "@/lib/prisma";
 
 type RouteContext = {
@@ -20,6 +23,12 @@ type RouteContext = {
 
 export async function POST(_request: Request, context: RouteContext) {
   try {
+    assertRateLimit({
+      key: `campaign:send-next:${getClientIp(_request)}`,
+      limit: 20,
+      windowMs: 15 * 60_000
+    });
+
     const user = await requireAuth();
     const { mandateId } = getMandateContext(user);
     const { id } = await context.params;
@@ -37,6 +46,14 @@ export async function POST(_request: Request, context: RouteContext) {
 
     if (!campaign) {
       throw new ApiRouteError(404, "Campanha não encontrada.", "NOT_FOUND");
+    }
+
+    if (!isMassCampaignEnabled()) {
+      throw new ApiRouteError(
+        403,
+        "Campanhas em massa estão desabilitadas por WHATSAPP_MASS_CAMPAIGN_ENABLED.",
+        "MASS_CAMPAIGN_DISABLED"
+      );
     }
 
     if (campaign.status !== CampaignStatus.RUNNING) {
@@ -82,6 +99,7 @@ export async function POST(_request: Request, context: RouteContext) {
         recommendedAction: simulation.recommendations[0] ?? "Executar plano de recuperacao antes de novo lote."
       });
       await syncCampaignOperationState(campaignId);
+      invalidateCampaignOperationalCache(mandateId);
 
       throw new ApiRouteError(
         409,
@@ -109,6 +127,7 @@ export async function POST(_request: Request, context: RouteContext) {
         recommendedAction: simulation.recommendations[0] ?? "Revisar campanha antes de retomar."
       });
       await syncCampaignOperationState(campaignId);
+      invalidateCampaignOperationalCache(mandateId);
 
       throw new ApiRouteError(
         409,
@@ -125,6 +144,7 @@ export async function POST(_request: Request, context: RouteContext) {
     });
 
     await syncCampaignOperationState(campaignId);
+    invalidateCampaignOperationalCache(mandateId);
 
     return apiSuccess({
       queuedDeliveries: queuedBatch.queuedCount,

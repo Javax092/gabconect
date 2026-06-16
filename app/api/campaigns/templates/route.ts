@@ -2,7 +2,9 @@ import { Prisma } from "@prisma/client";
 
 import { ApiRouteError, apiError, apiSuccess, readJson, validateSchema } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
+import { invalidateCampaignOperationalCache } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
+import { assertRateLimit, getClientIp } from "@/lib/security";
 import { whatsAppTemplateSchema } from "@/lib/validations/campaign-settings";
 
 export async function GET() {
@@ -34,6 +36,12 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    assertRateLimit({
+      key: `campaign-template:create:${getClientIp(request)}`,
+      limit: 20,
+      windowMs: 15 * 60_000
+    });
+
     const user = await requireAuth();
     const { mandateId } = getMandateContext(user);
     const body = await readJson(request);
@@ -45,6 +53,7 @@ export async function POST(request: Request) {
         ...parsed
       }
     });
+    invalidateCampaignOperationalCache(mandateId);
 
     return apiSuccess(
       {

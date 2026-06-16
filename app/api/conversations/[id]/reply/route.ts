@@ -1,10 +1,22 @@
-import { ConversationStatus, MessageDirection, QueuePriority } from "@prisma/client";
-import { ApiRouteError, apiError, apiSuccess, parseRouteId, readJson, validateSchema } from "@/lib/api";
+import {
+  ConversationStatus,
+  MessageDirection,
+  QueuePriority,
+} from "@prisma/client";
+import {
+  ApiRouteError,
+  apiError,
+  apiSuccess,
+  parseRouteId,
+  readJson,
+  validateSchema,
+} from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
 import { canSendMessage } from "@/lib/compliance";
 import { humanizeResponseTiming } from "@/lib/humanizer";
 import { enqueueJob, QUEUE_NAMES } from "@/lib/queue";
 import { prisma } from "@/lib/prisma";
+import { assertRateLimit, getClientIp } from "@/lib/security";
 import { conversationReplySchema } from "@/lib/validations/conversation";
 import { logWhatsAppEvent } from "@/lib/whatsapp";
 
@@ -16,6 +28,12 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    assertRateLimit({
+      key: `conversation:reply:${getClientIp(request)}`,
+      limit: 30,
+      windowMs: 15 * 60_000,
+    });
+
     const user = await requireAuth();
     const { mandateId } = getMandateContext(user);
     const body = await readJson(request);
@@ -26,11 +44,11 @@ export async function POST(request: Request, context: RouteContext) {
     const conversation = await prisma.conversation.findFirst({
       where: {
         id: conversationId,
-        mandateId
+        mandateId,
       },
       include: {
-        citizen: true
-      }
+        citizen: true,
+      },
     });
 
     if (!conversation) {
@@ -41,14 +59,16 @@ export async function POST(request: Request, context: RouteContext) {
       mandateId,
       conversationId: conversation.id,
       phone: conversation.citizen.phone,
-      message: parsed.text
+      message: parsed.text,
     });
 
     if (!compliance.allowed) {
       throw new ApiRouteError(409, compliance.reason, "COMPLIANCE_BLOCKED");
     }
 
-    const scheduledFor = new Date(Date.now() + humanizeResponseTiming(parsed.text));
+    const scheduledFor = new Date(
+      Date.now() + humanizeResponseTiming(parsed.text),
+    );
 
     await prisma.$transaction(async (tx) => {
       const message = await tx.message.create({
@@ -57,28 +77,28 @@ export async function POST(request: Request, context: RouteContext) {
           direction: MessageDirection.OUTBOUND,
           source: "HUMAN",
           content: parsed.text,
-          queuedAt: new Date()
-        }
+          queuedAt: new Date(),
+        },
       });
 
       await tx.conversation.update({
         where: {
-          id: conversation.id
+          id: conversation.id,
         },
         data: {
           status: ConversationStatus.HUMAN,
           aiPaused: true,
           humanTakeoverActive: true,
           humanPriority: true,
-          currentQueue: QUEUE_NAMES.outgoing
-        }
+          currentQueue: QUEUE_NAMES.outgoing,
+        },
       });
 
       const takeover = await tx.humanTakeover.findFirst({
         where: {
           conversationId: conversation.id,
-          active: true
-        }
+          active: true,
+        },
       });
 
       if (!takeover) {
@@ -88,8 +108,8 @@ export async function POST(request: Request, context: RouteContext) {
             conversationId: conversation.id,
             userId: user.id,
             reason: "Resposta manual enviada pela equipe.",
-            active: true
-          }
+            active: true,
+          },
         });
       }
 
@@ -109,13 +129,13 @@ export async function POST(request: Request, context: RouteContext) {
           phone: conversation.citizen.phone,
           text: parsed.text,
           source: "HUMAN",
-          scheduledFor: scheduledFor.toISOString()
-        }
+          scheduledFor: scheduledFor.toISOString(),
+        },
       });
     });
 
     return apiSuccess({
-      message: "Mensagem enviada para a fila de saída."
+      message: "Mensagem enviada para a fila de saída.",
     });
   } catch (error) {
     if (!(error instanceof ApiRouteError)) {
@@ -123,11 +143,15 @@ export async function POST(request: Request, context: RouteContext) {
 
       logWhatsAppEvent("error", "manual_reply_failed", {
         conversationId: id,
-        message: error instanceof Error ? error.message : "Erro desconhecido"
+        message: error instanceof Error ? error.message : "Erro desconhecido",
       });
 
       return apiError(
-        new ApiRouteError(500, "Não foi possível enviar a mensagem pelo WhatsApp.", "WHATSAPP_SEND_FAILED")
+        new ApiRouteError(
+          500,
+          "Não foi possível enviar a mensagem pelo WhatsApp.",
+          "WHATSAPP_SEND_FAILED",
+        ),
       );
     }
 

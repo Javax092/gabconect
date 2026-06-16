@@ -1,5 +1,6 @@
 import { Stamp } from "lucide-react";
 
+import { PageHeader } from "@/components/admin/page-header";
 import { DemoTemplatesPage } from "@/components/demo/demo-pages";
 import { TemplatesManager } from "@/components/templates/templates-manager";
 import { requireUser } from "@/lib/auth";
@@ -22,17 +23,12 @@ export default async function TemplatesPage() {
 
   return (
     <div className="space-y-6">
-      <section className="rounded-[28px] border border-white/10 bg-white/5 p-6">
-        <div className="flex items-center gap-3">
-          <Stamp className="h-5 w-5 text-cyan-300" />
-          <div>
-            <p className="text-sm font-semibold text-white">Templates oficiais</p>
-            <p className="mt-1 text-sm text-slate-400">
-              Mensagens aprovadas para uso seguro fora da janela de 24h ou em fluxos supervisionados.
-            </p>
-          </div>
-        </div>
-      </section>
+      <PageHeader
+        eyebrow="Templates"
+        title="Templates oficiais"
+        description="Mensagens aprovadas para uso seguro fora da janela de 24h ou em fluxos supervisionados."
+        icon={<Stamp className="h-5 w-5" />}
+      />
 
       <TemplatesManager
         initialTemplates={templates.map((template) => ({

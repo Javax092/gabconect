@@ -7,11 +7,19 @@ import {
   loginSchema,
   setSessionCookie
 } from "@/lib/auth";
+import { assertRateLimit, getClientIp, redactIdentifier } from "@/lib/security";
 
 export async function POST(request: Request) {
   try {
     const body = await readJson(request);
     const parsed = validateSchema(loginSchema, body);
+    const rateLimitKey = `login:${getClientIp(request)}:${parsed.email}`;
+
+    assertRateLimit({
+      key: rateLimitKey,
+      limit: 5,
+      windowMs: 15 * 60_000
+    });
 
     if (isDemoMode()) {
       const token = await createSessionToken({
@@ -40,12 +48,13 @@ export async function POST(request: Request) {
       });
     }
 
-    const user = await authenticateUser(parsed.email, parsed.password);
+    const normalizedEmail = parsed.email.trim().toLowerCase();
+    const user = await authenticateUser(normalizedEmail, parsed.password);
 
     if (!user) {
       console.warn("[auth/login] credenciais invalidas", {
-        userFound: false,
-        role: null,
+        credentialsAccepted: false,
+        emailRef: redactIdentifier(normalizedEmail),
         cookieName: SESSION_COOKIE
       });
       throw new ApiRouteError(401, "E-mail ou senha inválidos.", "INVALID_CREDENTIALS");
@@ -62,6 +71,7 @@ export async function POST(request: Request) {
     console.info("[auth/login] login concluido", {
       userFound: true,
       role: user.role,
+      userRef: redactIdentifier(user.id),
       cookieName: SESSION_COOKIE
     });
 
@@ -75,9 +85,12 @@ export async function POST(request: Request) {
       }
     });
   } catch (error) {
-    console.error("[auth/login] falha no login", {
-      reason: error instanceof Error ? error.message : "unknown"
-    });
+    console.error("[auth/login] erro completo:", error);
+  
+    if (error instanceof Error) {
+      console.error("[auth/login] stack:", error.stack);
+    }
+  
     return apiError(error);
   }
 }

@@ -5,49 +5,60 @@ import {
   MessageDirection,
   QueuePriority,
   QueueStatus,
-  WhatsAppMessageLogStatus,
-  WhatsAppTemplateStatus
+  WhatsAppTemplateStatus,
 } from "@prisma/client";
 
 import { ApiRouteError } from "@/lib/api";
-import { resolveCampaignAudience } from "@/lib/campaign-audience";
-import { appendCampaignEvent, syncCampaignOperationState } from "@/lib/campaign-infrastructure";
-import { prisma } from "@/lib/prisma";
+import { isAudienceValidationBypassed } from "@/lib/audience-validation";
 import {
-  enqueueJob,
-  QUEUE_NAMES,
-  updateQueueRecord,
-  type CampaignOutgoingMessageJobPayload
-} from "@/lib/queue";
-import { logWhatsAppEvent } from "@/lib/whatsapp";
+  getMonthDayKey,
+  materializeCampaignAudience,
+  resolveCampaignAudience,
+  type CampaignAudienceFilter,
+} from "@/lib/campaign-audience";
+import { prisma } from "@/lib/prisma";
+import { runSendGate } from "@/lib/send-gate";
+import { recordSendAttempt } from "@/lib/send-attempts";
 import {
   createCampaignRecipients,
-  markCampaignCompletedIfFinished,
+  syncCampaignCounters,
   sendWhatsAppTemplateMessage,
-  shouldPauseCampaignAfterFailure,
-  syncCampaignCounters
 } from "@/lib/whatsapp-campaigns";
+import { syncCampaignOperationState } from "@/lib/campaign-infrastructure";
+import { enqueueOutgoingJob, getQueueHealth } from "@/lib/queue";
+import { updateQueueRecord as updateMessageQueueRecord } from "@/lib/queue/updateQueueRecord";
+import { getWhatsAppHealthCheck } from "@/lib/whatsapp";
+
+import {
+  getCampaignModeDailyCap,
+  getMassCampaignTestLimit,
+  getRandomSendDelaySeconds,
+} from "@/lib/mass-campaign-config";
+
+/* =========================
+   CONFIG
+========================= */
 
 const BUSINESS_HOURS_START = 8;
 const BUSINESS_HOURS_END = 18;
-const LOCAL_EXECUTION_CAP = 3;
+const WORKER_HEARTBEAT_WINDOW_MS = 2 * 60 * 1000;
+
+/* =========================
+   UTILS
+========================= */
 
 function getDayBounds(date = new Date()) {
   const start = new Date(date);
   start.setHours(0, 0, 0, 0);
+
   const end = new Date(start);
   end.setDate(end.getDate() + 1);
+
   return { start, end };
 }
 
-export function getMonthDayKey(date = new Date()) {
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${month}-${day}`;
-}
-
 export function isWhatsAppDryRunEnabled() {
-  return process.env.WHATSAPP_DRY_RUN === "true";
+  return process.env.WHATSAPP_DRY_RUN?.trim().toLowerCase() === "true";
 }
 
 export function isWithinBusinessHours(date = new Date()) {
@@ -55,338 +66,415 @@ export function isWithinBusinessHours(date = new Date()) {
   return hour >= BUSINESS_HOURS_START && hour < BUSINESS_HOURS_END;
 }
 
-export function assertBusinessHours(date = new Date()) {
-  if (!isWithinBusinessHours(date)) {
+export function assertBusinessHours() {
+  if (!isWithinBusinessHours()) {
     throw new ApiRouteError(
       409,
-      `Campanhas só podem ser enfileiradas em horário comercial (${BUSINESS_HOURS_START}:00-${BUSINESS_HOURS_END}:00).`,
-      "OUTSIDE_BUSINESS_HOURS"
+      `Fora do horário comercial (${BUSINESS_HOURS_START}:00-${BUSINESS_HOURS_END}:00)`,
+      "OUTSIDE_BUSINESS_HOURS",
     );
   }
 }
 
-function resolveExecutionCap() {
-  return process.env.NODE_ENV === "production" ? Number.POSITIVE_INFINITY : LOCAL_EXECUTION_CAP;
-}
-
 function firstNameOf(name: string) {
-  return name.trim().split(/\s+/)[0] ?? name.trim();
+  return name?.trim()?.split(/\s+/)?.[0] ?? name;
 }
 
-export function personalizeCampaignText(templateBody: string, contactName: string) {
+function normalizeCampaignPhone(phone: string) {
+  return phone.replace(/[^\d]/g, "");
+}
+
+function redactCampaignPhone(phone: string) {
+  return phone.replace(/\d(?=\d{4})/g, "*");
+}
+
+function assertE164WithoutPlus(phone: string) {
+  if (!/^\d{10,15}$/.test(phone)) {
+    throw new ApiRouteError(
+      400,
+      "Telefone do destinatário deve estar em E.164 sem '+', exemplo 5592999999999.",
+      "INVALID_DESTINATION_PHONE",
+      { phone },
+    );
+  }
+}
+
+export async function assertRealCampaignDeliveryReadiness(input: {
+  templateName: string;
+  templateLanguage: string;
+  templateStatus: WhatsAppTemplateStatus;
+  templateCategory?: string | null;
+  templateBody?: string | null;
+}) {
+  if (isWhatsAppDryRunEnabled()) {
+    throw new ApiRouteError(
+      409,
+      "WHATSAPP_DRY_RUN=true bloqueia campanha real.",
+      "DRY_RUN_ENABLED",
+    );
+  }
+
+  if (input.templateStatus !== WhatsAppTemplateStatus.APPROVED) {
+    throw new ApiRouteError(
+      400,
+      "Template local não está aprovado.",
+      "TEMPLATE_NOT_APPROVED",
+    );
+  }
+
+  const [queueHealth, heartbeat, whatsAppHealth] = await Promise.all([
+    getQueueHealth(),
+    prisma.workerHeartbeat.findUnique({
+      where: { workerName: "outgoing" },
+      select: { status: true, lastSeenAt: true, note: true },
+    }),
+    getWhatsAppHealthCheck({
+      templateName: input.templateName,
+      language: input.templateLanguage,
+      category: input.templateCategory,
+      localBody: input.templateBody,
+    }),
+  ]);
+
+  if (!whatsAppHealth.ok) {
+    throw new ApiRouteError(
+      409,
+      whatsAppHealth.status === "TEMPLATE_INVALID"
+        ? "Template/idioma inválido para o WABA configurado."
+        : "WhatsApp Cloud API não está pronta para envio real.",
+      whatsAppHealth.status,
+      whatsAppHealth,
+    );
+  }
+
+  if (queueHealth.redis !== "ready" || queueHealth.queues !== "bullmq") {
+    throw new ApiRouteError(
+      503,
+      "Redis/BullMQ indisponível para enfileirar campanha real.",
+      "QUEUE_UNAVAILABLE",
+      queueHealth,
+    );
+  }
+
+  const workerOnline =
+    heartbeat?.status === "online" &&
+    Date.now() - heartbeat.lastSeenAt.getTime() <= WORKER_HEARTBEAT_WINDOW_MS;
+
+  if (!workerOnline) {
+    throw new ApiRouteError(
+      503,
+      "Worker outgoing indisponível ou sem heartbeat recente.",
+      "OUTGOING_WORKER_UNAVAILABLE",
+      {
+        workerName: "outgoing",
+        status: heartbeat?.status ?? "missing",
+        lastSeenAt: heartbeat?.lastSeenAt?.toISOString() ?? null,
+        note: heartbeat?.note ?? null,
+      },
+    );
+  }
+
+  return {
+    queueHealth,
+    whatsAppHealth,
+    worker: {
+      status: heartbeat.status,
+      lastSeenAt: heartbeat.lastSeenAt.toISOString(),
+    },
+  };
+}
+
+export function personalizeCampaignText(
+  templateBody: string,
+  contactName: string,
+) {
   return templateBody
     .replace(/\{\{\s*name\s*\}\}/gi, contactName)
     .replace(/\{\{\s*firstName\s*\}\}/gi, firstNameOf(contactName));
 }
+
+/* =========================
+   QUEUE CAMPAIGN
+========================= */
 
 export async function queueCampaignRecipients(input: {
   mandateId: string;
   campaignId: string;
   recommendedDailyLimit?: number;
   recommendedDelaySeconds?: number;
+  bypassBusinessHours?: boolean;
 }) {
-  assertBusinessHours();
+  if (!input.bypassBusinessHours) {
+    assertBusinessHours();
+  }
+
+  const testLimit = getMassCampaignTestLimit();
 
   const campaign = await prisma.campaign.findUniqueOrThrow({
-    where: {
-      id: input.campaignId
-    },
-    include: {
-      template: true,
-      audienceConfig: true
-    }
+    where: { id: input.campaignId },
+    include: { template: true, audienceConfig: true },
   });
 
-  const recipientSummary = await createCampaignRecipients(campaign.id, input.mandateId, campaign.segmentTags, {
-    birthdayMonthDay: campaign.audienceConfig?.birthdayMonthDay ?? null,
-    templateBody: campaign.template.body,
-    audienceFilter: {
-      birthdayMonthDay: campaign.audienceConfig?.birthdayMonthDay ?? null,
-      tags: campaign.audienceConfig?.tags ?? campaign.segmentTags,
-      groups: campaign.audienceConfig?.groups ?? [],
-      priorities: campaign.audienceConfig?.priorities ?? [],
-      locations: campaign.audienceConfig?.locations ?? [],
-      interests: campaign.audienceConfig?.interests ?? [],
-      contactTypes: campaign.audienceConfig?.contactTypes ?? [],
-      selectedContactIds: campaign.audienceConfig?.selectedContactIds ?? []
-    }
-  });
-
-  console.info("[campaign-queue] recipients-prepared", {
+  console.info("[campaign:start]", {
     campaignId: campaign.id,
     mandateId: input.mandateId,
-    selectedContactIds: campaign.audienceConfig?.selectedContactIds.length ?? 0,
-    eligibleContacts: recipientSummary.eligibleContacts,
-    createdRecipients: recipientSummary.createdRecipients,
-    blockedBy: {
-      invalidPhone: recipientSummary.totalInvalidos,
-      explicitBlock: recipientSummary.totalBloqueados,
-      optOut: recipientSummary.totalOptOut,
-      missingPhone: recipientSummary.totalSemTelefone,
-      missingOptIn: recipientSummary.totalSemOptIn
-    }
+    mode: campaign.campaignMode,
+    templateName: campaign.template.metaTemplateName,
+    language: campaign.template.language,
   });
 
+  const recipientSummary = await createCampaignRecipients(
+    campaign.id,
+    input.mandateId,
+    campaign.segmentTags,
+    {
+      birthdayMonthDay: campaign.audienceConfig?.birthdayMonthDay ?? null,
+      templateBody: campaign.template.body,
+      audienceFilter: {
+        birthdayMonthDay: campaign.audienceConfig?.birthdayMonthDay ?? null,
+        tags: campaign.audienceConfig?.tags ?? [],
+        groups: campaign.audienceConfig?.groups ?? [],
+        priorities: campaign.audienceConfig?.priorities ?? [],
+        locations: campaign.audienceConfig?.locations ?? [],
+        interests: campaign.audienceConfig?.interests ?? [],
+        contactTypes: campaign.audienceConfig?.contactTypes ?? [],
+        selectedContactIds: campaign.audienceConfig?.selectedContactIds ?? [],
+      },
+    },
+  );
+
   const { start, end } = getDayBounds();
+
   const dailySentCount = await prisma.campaignRecipient.count({
     where: {
       campaignId: campaign.id,
       status: CampaignRecipientStatus.SENT,
-      sentAt: {
-        gte: start,
-        lt: end
-      }
-    }
+      sentAt: { gte: start, lt: end },
+    },
   });
 
   const safeDailyLimit = Math.min(
     campaign.dailyLimit,
+    getCampaignModeDailyCap(campaign.campaignMode),
     input.recommendedDailyLimit ?? campaign.dailyLimit,
-    resolveExecutionCap()
+    testLimit,
   );
+
   const remainingCapacity = Math.max(0, safeDailyLimit - dailySentCount);
 
-  if (remainingCapacity === 0) {
-    return {
-      recipientSummary,
+  if (remainingCapacity <= 0) {
+    console.warn("[campaign:enqueue]", {
+      campaignId: campaign.id,
+      mandateId: input.mandateId,
+      eligibleContacts: recipientSummary.eligibleContacts,
+      createdRecipients: recipientSummary.createdRecipients,
       queuedCount: 0,
-      safeDailyLimit
-    };
+      reason: "DAILY_CAP_REACHED",
+      safeDailyLimit,
+    });
+    return { queuedCount: 0, safeDailyLimit, recipientSummary };
   }
 
   const recipients = await prisma.campaignRecipient.findMany({
     where: {
       campaignId: campaign.id,
       status: CampaignRecipientStatus.PENDING,
-      queuedAt: null
+      queuedAt: null,
     },
-    include: {
-      contact: true
-    },
-    orderBy: {
-      createdAt: "asc"
-    },
-    take: remainingCapacity
+    include: { contact: true },
+    orderBy: { createdAt: "asc" },
+    take: remainingCapacity,
   });
 
   let queuedCount = 0;
+  let accumulatedDelaySeconds = 0;
 
-  for (const [index, recipient] of recipients.entries()) {
-    if (!recipient.contact.optIn || recipient.contact.status !== ContactStatus.ACTIVE) {
+  const skipValidation = isAudienceValidationBypassed();
+
+  for (const recipient of recipients) {
+    if (
+      !skipValidation &&
+      (!recipient.contact.optIn ||
+        recipient.contact.status !== ContactStatus.ACTIVE)
+    ) {
       await prisma.campaignRecipient.update({
-        where: {
-          id: recipient.id
-        },
+        where: { id: recipient.id },
         data: {
           status:
             recipient.contact.status === ContactStatus.UNSUBSCRIBED
               ? CampaignRecipientStatus.UNSUBSCRIBED
               : CampaignRecipientStatus.SKIPPED,
-          errorMessage: "Contato inelegível no momento do enfileiramento."
-        }
+        },
       });
       continue;
     }
 
-    const personalizedText = personalizeCampaignText(campaign.template.body, recipient.contact.name);
-    const scheduledFor = new Date(Date.now() + index * (input.recommendedDelaySeconds ?? campaign.delaySeconds) * 1000);
+    const personalizedText = personalizeCampaignText(
+      campaign.template.body,
+      recipient.contact.name,
+    );
+
+    const baseDelay = input.recommendedDelaySeconds ?? campaign.delaySeconds;
+    const randomDelay = getRandomSendDelaySeconds();
+
+    accumulatedDelaySeconds += Math.max(baseDelay, randomDelay);
+
+    const scheduledFor = new Date(Date.now() + accumulatedDelaySeconds * 1000);
+    const normalizedPhone = normalizeCampaignPhone(recipient.contact.phone);
+    assertE164WithoutPlus(normalizedPhone);
 
     await prisma.campaignRecipient.update({
-      where: {
-        id: recipient.id
-      },
+      where: { id: recipient.id },
       data: {
+        status: CampaignRecipientStatus.QUEUED,
         queuedAt: new Date(),
         messagePreview: personalizedText,
-        errorMessage: null
-      }
+      },
     });
 
-    const delaySeconds = index * (input.recommendedDelaySeconds ?? campaign.delaySeconds);
-
-    const queueResult = await enqueueJob(QUEUE_NAMES.outgoing, {
+    const queueResult = await enqueueOutgoingJob({
       mandateId: input.mandateId,
       direction: MessageDirection.OUTBOUND,
       priority: QueuePriority.NORMAL,
       scheduledFor,
+      requireBullMQ: true,
       payload: {
-        queueRecordId: "",
         kind: "CAMPAIGN",
         mandateId: input.mandateId,
         campaignId: campaign.id,
         campaignRecipientId: recipient.id,
         contactId: recipient.contact.id,
-        phone: recipient.contact.phone,
+        phone: normalizedPhone,
         contactName: recipient.contact.name,
         templateId: campaign.template.id,
         templateBody: campaign.template.body,
         metaTemplateName: campaign.template.metaTemplateName,
         language: campaign.template.language,
         personalizedText,
-        scheduledFor: scheduledFor.toISOString()
-      } satisfies CampaignOutgoingMessageJobPayload
+        scheduledFor: scheduledFor.toISOString(),
+      },
     });
 
-    await appendCampaignEvent({
+    await recordSendAttempt({
       mandateId: input.mandateId,
       campaignId: campaign.id,
       campaignRecipientId: recipient.id,
-      eventType: "RECIPIENT_QUEUED",
-      title: "Destinatario enfileirado",
-      message: "Contato elegivel confirmado para a fila operacional.",
-      metadata: {
-        contactId: recipient.contact.id,
-        phone: recipient.contact.phone
-      }
+      contactId: recipient.contact.id,
+      phone: normalizedPhone,
+      template: campaign.template.metaTemplateName,
+      status: "QUEUED",
+      reason: "Queued",
+      queueRecordId: queueResult.queueRecordId,
     });
 
-    await appendCampaignEvent({
-      mandateId: input.mandateId,
-      campaignId: campaign.id,
-      campaignRecipientId: recipient.id,
-      eventType: "campaign.job_queued",
-      title: "Job enfileirado",
-      message: `Delivery inserido na fila de saida (${queueResult.mode}) para processamento pelo worker.`,
-      metadata: {
-        queueRecordId: queueResult.queueRecordId,
-        scheduledFor: scheduledFor.toISOString()
-      }
-    });
+    queuedCount++;
 
-    await appendCampaignEvent({
-      mandateId: input.mandateId,
+    console.info("[campaign:enqueue]", {
       campaignId: campaign.id,
       campaignRecipientId: recipient.id,
-      eventType: "campaign.delay_applied",
-      title: "Delay humano aplicado",
-      message: `Janela de ${delaySeconds}s aplicada antes do envio deste contato.`,
-      metadata: {
-        delaySeconds,
-        scheduledFor: scheduledFor.toISOString()
-      }
+      queueRecordId: queueResult.queueRecordId,
+      contactId: recipient.contact.id,
+      phone: redactCampaignPhone(normalizedPhone),
+      scheduledFor: scheduledFor.toISOString(),
     });
-
-    logWhatsAppEvent("info", "campaign_queued", {
-      campaignId: campaign.id,
-      campaignRecipientId: recipient.id,
-      status: "queued",
-      dryRun: isWhatsAppDryRunEnabled()
-    });
-    queuedCount += 1;
   }
 
   await syncCampaignCounters(campaign.id);
   await syncCampaignOperationState(campaign.id);
 
-  console.info("[campaign-queue] batch-enqueued", {
-    campaignId: campaign.id,
-    mandateId: input.mandateId,
-    queuedCount,
-    safeDailyLimit
-  });
-
-  return {
-    recipientSummary,
-    queuedCount,
-    safeDailyLimit
-  };
+  return { queuedCount, safeDailyLimit, recipientSummary };
 }
 
-export async function processCampaignOutgoingJob(payload: CampaignOutgoingMessageJobPayload) {
+/* =========================
+   WORKER
+========================= */
+
+export type CampaignJobPayload = {
+  queueRecordId: string;
+  mandateId: string;
+  campaignId: string;
+  campaignRecipientId: string;
+  contactId: string;
+  phone: string;
+  contactName: string;
+  templateId: string;
+  templateBody: string;
+  metaTemplateName: string;
+  language: string;
+  personalizedText?: string;
+  scheduledFor: string;
+};
+
+async function updateQueueRecord(queueRecordId: string, status: QueueStatus) {
+  await updateMessageQueueRecord(queueRecordId, status);
+}
+
+export async function processCampaignJob(payload: CampaignJobPayload) {
+  console.info("[worker:outgoing:received]", {
+    queueRecordId: payload.queueRecordId,
+    kind: "CAMPAIGN",
+    campaignId: payload.campaignId,
+    campaignRecipientId: payload.campaignRecipientId,
+    contactId: payload.contactId,
+    scheduledFor: payload.scheduledFor,
+  });
+
   await updateQueueRecord(payload.queueRecordId, QueueStatus.PROCESSING);
 
-  await appendCampaignEvent({
-    mandateId: payload.mandateId,
-    campaignId: payload.campaignId,
-    campaignRecipientId: payload.campaignRecipientId,
-    eventType: "campaign.processing",
-    title: "Job em processamento",
-    message: "Worker retirou o destinatario da fila e iniciou a tentativa de envio."
-  });
-
-  logWhatsAppEvent("info", "campaign_processing", {
-    campaignId: payload.campaignId,
-    campaignRecipientId: payload.campaignRecipientId,
-    status: "processing"
-  });
-
   const recipient = await prisma.campaignRecipient.findUnique({
-    where: {
-      id: payload.campaignRecipientId
-    },
-    include: {
-      campaign: true,
-      contact: true
-    }
+    where: { id: payload.campaignRecipientId },
+    include: { campaign: true, contact: true },
   });
 
   if (!recipient) {
-    throw new Error("Delivery da campanha não encontrado.");
+    await updateQueueRecord(payload.queueRecordId, QueueStatus.FAILED);
+    throw new Error("Recipient not found");
   }
 
   if (recipient.campaign.status !== CampaignStatus.RUNNING) {
-    throw new Error("A campanha não está em execução.");
-  }
-
-  if (!isWithinBusinessHours()) {
-    throw new Error("Worker bloqueou envio fora do horário comercial.");
+    await updateQueueRecord(payload.queueRecordId, QueueStatus.CANCELLED);
+    return;
   }
 
   try {
-    if (isWhatsAppDryRunEnabled()) {
-      const simulatedAt = new Date();
+    await prisma.campaignRecipient.update({
+      where: { id: payload.campaignRecipientId },
+      data: {
+        status: CampaignRecipientStatus.PROCESSING,
+      },
+    });
 
-      await prisma.whatsAppMessageLog.create({
-        data: {
-          mandateId: payload.mandateId,
-          contactId: payload.contactId,
-          templateId: payload.templateId,
-          campaignId: payload.campaignId,
-          campaignRecipientId: payload.campaignRecipientId,
-          direction: "OUTBOUND",
-          status: WhatsAppMessageLogStatus.SIMULATED_SENT,
-          phone: payload.phone,
-          payload: {
-            simulated: true,
-            personalizedText: payload.personalizedText,
-            metaTemplateName: payload.metaTemplateName
-          },
-          sentAt: simulatedAt
-        }
-      });
+    const gate = await runSendGate({
+      ...payload,
+      kind: "CAMPAIGN",
+      dryRun: isWhatsAppDryRunEnabled(),
+    });
 
+    if (!gate.allowed) {
       await prisma.campaignRecipient.update({
-        where: {
-          id: payload.campaignRecipientId
+        where: { id: payload.campaignRecipientId },
+        data: {
+          status: CampaignRecipientStatus.FAILED,
+          errorMessage: gate.reason,
         },
+      });
+      await updateQueueRecord(payload.queueRecordId, QueueStatus.CANCELLED);
+      return;
+    }
+
+    if (isWhatsAppDryRunEnabled()) {
+      await prisma.campaignRecipient.update({
+        where: { id: payload.campaignRecipientId },
         data: {
           status: CampaignRecipientStatus.SENT,
-          sentAt: simulatedAt,
-          errorMessage: null
-        }
+          sentAt: new Date(),
+        },
       });
 
-      await updateQueueRecord(payload.queueRecordId, QueueStatus.SIMULATED_SENT, {
-        processedAt: simulatedAt
-      });
-
-      await appendCampaignEvent({
-        mandateId: payload.mandateId,
-        campaignId: payload.campaignId,
-        campaignRecipientId: payload.campaignRecipientId,
-        eventType: "campaign.simulated_sent",
-        title: "Envio simulado",
-        message: "Worker executou o lote em modo dry-run sem chamar a Meta."
-      });
-      await syncCampaignCounters(payload.campaignId);
-      await syncCampaignOperationState(payload.campaignId);
-      await markCampaignCompletedIfFinished(payload.campaignId);
-
-      logWhatsAppEvent("info", "campaign_simulated_sent", {
-        campaignId: payload.campaignId,
-        campaignRecipientId: payload.campaignRecipientId,
-        status: "simulated_sent"
-      });
+      await updateQueueRecord(
+        payload.queueRecordId,
+        QueueStatus.SIMULATED_SENT,
+      );
       return;
     }
 
@@ -397,109 +485,56 @@ export async function processCampaignOutgoingJob(payload: CampaignOutgoingMessag
       contact: {
         id: payload.contactId,
         phone: payload.phone,
-        name: payload.contactName
+        name: payload.contactName,
       },
       template: {
         id: payload.templateId,
         metaTemplateName: payload.metaTemplateName,
         language: payload.language,
         body: payload.templateBody,
-        status: WhatsAppTemplateStatus.APPROVED
-      }
+        status: WhatsAppTemplateStatus.APPROVED,
+      },
     });
 
     await prisma.campaignRecipient.update({
-      where: {
-        id: payload.campaignRecipientId
-      },
+      where: { id: payload.campaignRecipientId },
       data: {
         status: CampaignRecipientStatus.SENT,
         sentAt: delivery.sentAt,
-        errorMessage: null
-      }
+      },
     });
 
-    await appendCampaignEvent({
-      mandateId: payload.mandateId,
+    await updateQueueRecord(payload.queueRecordId, QueueStatus.SENT);
+  } catch (err) {
+    console.error("[whatsapp:send:failed]", {
+      queueRecordId: payload.queueRecordId,
       campaignId: payload.campaignId,
       campaignRecipientId: payload.campaignRecipientId,
-      eventType: "campaign.sent",
-      title: "Envio aceito pela Meta",
-      message: "Mensagem de campanha entregue ao sender oficial do WhatsApp."
+      error: err instanceof Error ? err.message : "Unknown error",
     });
-    await syncCampaignCounters(payload.campaignId);
-    await syncCampaignOperationState(payload.campaignId);
-    await markCampaignCompletedIfFinished(payload.campaignId);
-
-    logWhatsAppEvent("info", "campaign_sent", {
-      campaignId: payload.campaignId,
-      campaignRecipientId: payload.campaignRecipientId,
-      status: "sent",
-      providerMessageId: delivery.providerMessageId
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Falha ao processar delivery da campanha.";
 
     await prisma.campaignRecipient.update({
-      where: {
-        id: payload.campaignRecipientId
-      },
+      where: { id: payload.campaignRecipientId },
       data: {
         status: CampaignRecipientStatus.FAILED,
-        errorMessage: message
-      }
+        errorMessage: err instanceof Error ? err.message : "Unknown error",
+      },
     });
 
-    if (await shouldPauseCampaignAfterFailure(payload.campaignId)) {
-      await prisma.campaign.update({
-        where: {
-          id: payload.campaignId
-        },
-        data: {
-          status: CampaignStatus.PAUSED
-        }
-      });
-    }
-
-    await appendCampaignEvent({
-      mandateId: payload.mandateId,
-      campaignId: payload.campaignId,
-      campaignRecipientId: payload.campaignRecipientId,
-      level: "WARN",
-      eventType: "campaign.failed",
-      title: "Falha no envio",
-      message,
-      recommendedAction: "Validar motivo, revisar fila e permitir retry controlado se o risco seguir aceitavel."
-    });
-
-    await syncCampaignCounters(payload.campaignId);
-    await syncCampaignOperationState(payload.campaignId);
-
-    logWhatsAppEvent("error", "campaign_failed", {
-      campaignId: payload.campaignId,
-      campaignRecipientId: payload.campaignRecipientId,
-      status: "failed",
-      reason: message
-    });
-    throw error;
+    await updateQueueRecord(payload.queueRecordId, QueueStatus.FAILED);
+    throw err;
   }
 }
 
+/* =========================
+   PREVIEW
+========================= */
+
 export async function getCampaignAudiencePreview(input: {
   mandateId: string;
-  templateBody: string;
-  audienceFilter: {
-    birthdayMonthDay?: string | null;
-    tags?: string[];
-    groups?: string[];
-    priorities?: string[];
-    locations?: string[];
-    interests?: string[];
-    contactTypes?: string[];
-    selectedContactIds?: string[];
-  };
   campaignId?: string;
+  templateBody: string;
+  audienceFilter: CampaignAudienceFilter;
   selectedContactIds?: string[];
   selectedOnly?: boolean;
   showOnlyEligible?: boolean;
@@ -507,10 +542,18 @@ export async function getCampaignAudiencePreview(input: {
   optInFilter?: "ALL" | "OPT_IN" | "SEM_OPT_IN" | "OPT_OUT";
   contactStatus?: "ALL" | "ACTIVE" | "UNSUBSCRIBED" | "BLOCKED" | "INVALID";
   birthdayFilter?: "ALL" | "WITH_BIRTHDAY" | "TODAY";
-  limit?: number;
   page?: number;
+  limit?: number;
   sortBy?: "name" | "code" | "importedAt";
   sortOrder?: "asc" | "desc";
 }) {
   return resolveCampaignAudience(input);
 }
+
+/* =========================
+   EXPORT ADICIONAL (CORREÇÃO PEDIDA)
+========================= */
+
+export { resolveAudienceFilterByMode } from "./mode";
+export { getMonthDayKey, materializeCampaignAudience, resolveCampaignAudience };
+export type { CampaignAudienceFilter };

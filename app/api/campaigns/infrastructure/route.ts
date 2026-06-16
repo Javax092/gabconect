@@ -1,12 +1,6 @@
 import { apiError, apiSuccess } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
-import {
-  bootstrapCampaignEvents,
-  ensureCampaignInfrastructure,
-  getAudienceDimensionOptions,
-  getInfrastructureSnapshot,
-  syncCampaignOperationState
-} from "@/lib/campaign-infrastructure";
+import { getCachedOperationalControlSnapshot } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
 
 export async function GET() {
@@ -19,32 +13,11 @@ export async function GET() {
         id: mandateId
       },
       select: {
-        whatsappNumber: true,
-        campaigns: {
-          select: {
-            id: true
-          },
-          take: 8,
-          orderBy: {
-            updatedAt: "desc"
-          }
-        }
+        whatsappNumber: true
       }
     });
 
-    await ensureCampaignInfrastructure(mandateId, mandate.whatsappNumber);
-    await bootstrapCampaignEvents(mandateId);
-    await Promise.all(mandate.campaigns.map((campaign) => syncCampaignOperationState(campaign.id)));
-
-    const [snapshot, audienceOptions] = await Promise.all([
-      getInfrastructureSnapshot(mandateId, mandate.whatsappNumber),
-      getAudienceDimensionOptions(mandateId)
-    ]);
-
-    return apiSuccess({
-      ...snapshot,
-      audienceOptions
-    });
+    return apiSuccess(await getCachedOperationalControlSnapshot(mandateId, mandate.whatsappNumber));
   } catch (error) {
     return apiError(error);
   }

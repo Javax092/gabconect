@@ -1,3 +1,5 @@
+import "../lib/load-env";
+
 import {
   ConversationStatus,
   DemandPriority,
@@ -15,6 +17,24 @@ import { prisma } from "../lib/prisma";
 
 function parseBoolean(value: string | undefined) {
   return value === "true";
+}
+
+function resolveRequiredProductionEnv(name: string, fallback?: string) {
+  const value = process.env[name]?.trim();
+
+  if (value) {
+    return value;
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(`Variavel obrigatoria ausente em production: ${name}`);
+  }
+
+  if (fallback) {
+    return fallback;
+  }
+
+  throw new Error(`Variavel obrigatoria ausente: ${name}`);
 }
 
 async function ensureMandateDefaults(mandateId: string) {
@@ -270,7 +290,8 @@ async function seedCampaignData(mandateId: string) {
           priorities: [],
           locations: [],
           interests: [],
-          contactTypes: []
+          contactTypes: [],
+          selectedContactIds: []
         }
       }
     }
@@ -291,7 +312,8 @@ async function seedCampaignData(mandateId: string) {
           priorities: [],
           locations: [],
           interests: ["academia"],
-          contactTypes: []
+          contactTypes: [],
+          selectedContactIds: []
         }
       }
     }
@@ -312,7 +334,8 @@ async function seedCampaignData(mandateId: string) {
           priorities: [],
           locations: [],
           interests: [],
-          contactTypes: []
+          contactTypes: [],
+          selectedContactIds: []
         }
       }
     }
@@ -559,13 +582,21 @@ async function seedSampleData(mandateId: string) {
 
 async function main() {
   const mandateId = "seed-mandate-gabinete-conectado";
-  const email = "admin@gabinete.com";
-  const password = "admin123";
-  const name = "Administrador Gabinete";
-  const mandateName = "Gabinete Conectado";
-  const politicianName = "Vereador Demo";
-  const city = "Manaus";
-  const state = "AM";
+  const email = resolveRequiredProductionEnv(
+    "ADMIN_DEFAULT_EMAIL",
+    process.env.SEED_ADMIN_EMAIL ?? "admin@example.com"
+  )
+    .trim()
+    .toLowerCase();
+  const password = resolveRequiredProductionEnv(
+    "ADMIN_DEFAULT_PASSWORD",
+    process.env.SEED_ADMIN_PASSWORD ?? "change-me-now-123"
+  );
+  const name = process.env.SEED_ADMIN_NAME?.trim() || "Administrador Gabinete";
+  const mandateName = process.env.SEED_MANDATE_NAME?.trim() || "Gabinete Conectado";
+  const politicianName = process.env.SEED_POLITICIAN_NAME?.trim() || "Parlamentar Responsavel";
+  const city = process.env.SEED_MANDATE_CITY?.trim() || "Manaus";
+  const state = process.env.SEED_MANDATE_STATE?.trim() || "AM";
   const whatsappNumber = process.env.SEED_WHATSAPP_NUMBER ?? "+5500000000000";
   const aiPrompt =
     process.env.SEED_AI_PROMPT ??
@@ -626,7 +657,7 @@ async function main() {
   console.log("===================================");
   console.log("ADMIN CRIADO");
   console.log(`Email: ${email}`);
-  console.log(`Senha: ${password}`);
+  console.log("Senha: definida via variavel de ambiente");
   console.log("===================================");
 }
 

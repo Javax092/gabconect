@@ -1,6 +1,7 @@
 import { apiError, apiSuccess, readJson, validateSchema } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
 import { getCampaignSettings, upsertCampaignSettings } from "@/lib/campaign-settings";
+import { invalidateCampaignOperationalCache } from "@/lib/operational-cache";
 import { campaignSettingsSchema } from "@/lib/validations/campaign-settings";
 
 export async function GET() {
@@ -22,6 +23,7 @@ export async function PUT(request: Request) {
     const body = await readJson(request);
     const parsed = validateSchema(campaignSettingsSchema, body);
     const settings = await upsertCampaignSettings(mandateId, parsed);
+    invalidateCampaignOperationalCache(mandateId);
 
     return apiSuccess({
       settings,

@@ -1,0 +1,25 @@
+./README.md:16:- filas BullMQ para processamento assíncrono
+./README.md:43:- BullMQ
+./README.md:170:O app usa BullMQ com `REDIS_URL`.
+./README.md:201:- envio real exige `REDIS_URL`, BullMQ ativo e heartbeat recente do `worker:outgoing`
+./workers/incoming-message.worker.ts:44:  await reportHeartbeat("online", "Worker BullMQ online.");
+./workers/incoming-message.worker.ts:46:    void reportHeartbeat("online", "Worker BullMQ online.").catch(() => undefined);
+./workers/outgoing-message.worker.ts:37:async function processDatabaseFallbackQueue() {
+./workers/outgoing-message.worker.ts:101:      void processDatabaseFallbackQueue().catch((error) => {
+./workers/outgoing-message.worker.ts:106:    await processDatabaseFallbackQueue();
+./workers/outgoing-message.worker.ts:110:  await reportHeartbeat("online", "Worker BullMQ online.");
+./workers/outgoing-message.worker.ts:112:    void reportHeartbeat("online", "Worker BullMQ online.").catch(() => undefined);
+./workers/human-escalation.worker.ts:44:  await reportHeartbeat("online", "Worker BullMQ online.");
+./workers/human-escalation.worker.ts:46:    void reportHeartbeat("online", "Worker BullMQ online.").catch(() => undefined);
+./docs/visao-estrategica-gabinete-conectado.md:468:Redis sustenta a execução das filas em tempo real. É a base operacional do BullMQ para jobs atrasados, concorrência e desacoplamento.
+./docs/visao-estrategica-gabinete-conectado.md:470:### BullMQ
+./docs/visao-estrategica-gabinete-conectado.md:471:BullMQ fornece:
+./docs/checklist-producao.md:13:- `REDIS_URL`: Redis real para BullMQ.
+./lib/operational-readiness.ts:410:    reasons.push("Envio real exige Redis com BullMQ ativo.");
+./lib/queue.ts:137:async function getQueue(name: QueueName) {
+./lib/queue.ts:150:  const queue = new Queue(name, {
+./lib/queue.ts:240:  const queue = await getQueue(name);
+./lib/queue.ts:244:      throw new Error("REDIS_URL ausente em produção. Redis é obrigatório para BullMQ.");
+./lib/queue.ts:311:  const worker = new Worker(
+./lib/queue.ts:393:  return new QueueEvents(name, {
+./lib/security.ts:125:      description: "Redis para BullMQ em produção."

@@ -3,6 +3,8 @@ import { CampaignStatus, OperationEventLevel } from "@prisma/client";
 import { ApiRouteError, apiError, apiSuccess, parseRouteId } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
 import { appendCampaignEvent, syncCampaignOperationState } from "@/lib/campaign-infrastructure";
+import { cancelQueuedCampaignDeliveries } from "@/lib/campaign-queue-cancellation";
+import { invalidateCampaignOperationalCache } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
 
 type RouteContext = {
@@ -41,6 +43,11 @@ export async function POST(_request: Request, context: RouteContext) {
         status: CampaignStatus.PAUSED
       }
     });
+    const cancelledQueueRecords = await cancelQueuedCampaignDeliveries({
+      mandateId,
+      campaignId,
+      reason: "Campanha pausada pelo operador."
+    });
     await syncCampaignOperationState(campaignId);
     await appendCampaignEvent({
       mandateId,
@@ -49,8 +56,12 @@ export async function POST(_request: Request, context: RouteContext) {
       eventType: "campaign.paused",
       title: "Campanha pausada",
       message: "Fluxo interrompido para proteger reputacao e evitar pressao excessiva na fila.",
-      recommendedAction: "Revisar publico, delay e throughput antes de retomar."
+      recommendedAction: "Revisar publico, delay e throughput antes de retomar.",
+      metadata: {
+        cancelledQueueRecords
+      }
     });
+    invalidateCampaignOperationalCache(mandateId);
 
     return apiSuccess({
       campaign: updatedCampaign,

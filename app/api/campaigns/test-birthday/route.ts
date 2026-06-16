@@ -4,6 +4,7 @@ import { ApiRouteError, apiError, apiSuccess } from "@/lib/api";
 import { getMandateContext, requireAuth } from "@/lib/auth";
 import { getMonthDayKey } from "@/lib/campaign-execution";
 import { getCampaignSettings } from "@/lib/campaign-settings";
+import { invalidateCampaignOperationalCache } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
 
 export async function POST() {
@@ -17,24 +18,24 @@ export async function POST() {
         where: {
           mandateId,
           status: WhatsAppTemplateStatus.APPROVED,
-          metaTemplateName: "feliz_aniversario_teste"
-        }
+          metaTemplateName: "feliz_aniversario_teste",
+        },
       })) ??
       (await prisma.whatsAppTemplate.findFirst({
         where: {
           mandateId,
-          status: WhatsAppTemplateStatus.APPROVED
+          status: WhatsAppTemplateStatus.APPROVED,
         },
         orderBy: {
-          updatedAt: "desc"
-        }
+          updatedAt: "desc",
+        },
       }));
 
     if (!template) {
       throw new ApiRouteError(
         400,
         "Cadastre um template aprovado antes de rodar o teste de aniversário.",
-        "TEMPLATE_NOT_APPROVED"
+        "TEMPLATE_NOT_APPROVED",
       );
     }
 
@@ -47,6 +48,7 @@ export async function POST() {
         segmentTags: [],
         dailyLimit: Math.min(settings.defaultDailyLimit, 3),
         delaySeconds: Math.max(60, settings.defaultDelaySeconds),
+        campaignMode: "BIRTHDAY",
         status: CampaignStatus.DRAFT,
         audienceConfig: {
           create: {
@@ -57,15 +59,16 @@ export async function POST() {
             locations: [],
             interests: [],
             contactTypes: [],
-            selectedContactIds: []
-          }
-        }
-      }
+            selectedContactIds: [],
+          },
+        },
+      },
     });
+    invalidateCampaignOperationalCache(mandateId);
 
     return apiSuccess({
       campaignId: campaign.id,
-      message: "Campanha de aniversario de teste criada."
+      message: "Campanha de aniversario de teste criada.",
     });
   } catch (error) {
     return apiError(error);
