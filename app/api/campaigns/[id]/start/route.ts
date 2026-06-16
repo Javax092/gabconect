@@ -70,6 +70,26 @@ function getTemplateVariables(body: string) {
   );
 }
 
+function campaignStartDetails(input: {
+  campaignId: string | null;
+  mandateId: string | null;
+  reason: string;
+  details?: unknown;
+}) {
+  return {
+    campaignId: input.campaignId,
+    mandateId: input.mandateId,
+    reason: input.reason,
+    ...(input.details === undefined ? {} : { details: input.details }),
+  };
+}
+
+const STARTABLE_CAMPAIGN_STATUSES: CampaignStatus[] = [
+  CampaignStatus.DRAFT,
+  CampaignStatus.SCHEDULED,
+  CampaignStatus.PAUSED,
+];
+
 export async function POST(request: Request, context: RouteContext) {
   let campaignIdForFailure: string | null = null;
   let mandateIdForFailure: string | null = null;
@@ -99,6 +119,15 @@ export async function POST(request: Request, context: RouteContext) {
     campaignIdForFailure = campaignId;
     mandateIdForFailure = mandateId;
 
+    if (user.role !== Role.ADMIN) {
+      throw new ApiRouteError(
+        403,
+        "Usuário sem permissão ADMIN para iniciar campanhas.",
+        "ADMIN_REQUIRED",
+        { role: user.role },
+      );
+    }
+
     const campaign = await prisma.campaign.findFirst({
       where: { id: campaignId, mandateId },
       include: {
@@ -109,6 +138,15 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (!campaign) {
       throw new ApiRouteError(404, "Campanha não encontrada.", "NOT_FOUND");
+    }
+
+    if (!STARTABLE_CAMPAIGN_STATUSES.includes(campaign.status)) {
+      throw new ApiRouteError(
+        409,
+        `Campanha em status inválido para iniciar: ${campaign.status}.`,
+        "INVALID_CAMPAIGN_STATUS",
+        { status: campaign.status },
+      );
     }
 
     const audienceFilter = resolveAudienceFilterByMode({
@@ -186,7 +224,7 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (!isMassCampaignEnabled()) {
       throw new ApiRouteError(
-        403,
+        409,
         "Campanhas em massa desabilitadas.",
         "MASS_CAMPAIGN_DISABLED",
         safetySummary,
@@ -283,6 +321,13 @@ export async function POST(request: Request, context: RouteContext) {
       );
     }
 
+    console.info("[campaign:start:success]", {
+      campaignId: campaign.id,
+      mandateId,
+      queuedDeliveries: queuedBatch.queuedCount,
+      campaignMode: campaign.campaignMode,
+    });
+
     // ⚠️ removido syncCampaignCounters (provável fonte de inconsistência)
     // await syncCampaignCounters(campaign.id);
 
@@ -313,12 +358,27 @@ export async function POST(request: Request, context: RouteContext) {
       );
     }
 
-    console.error("[campaign-start-error]", error);
-
-    console.error("[campaign-start-context]", {
-      campaignId: campaignIdForFailure,
-      mandateId: mandateIdForFailure,
-    });
+    if (error instanceof ApiRouteError) {
+      const logPayload = campaignStartDetails({
+        campaignId: campaignIdForFailure,
+        mandateId: mandateIdForFailure,
+        reason: error.code,
+        details: error.details,
+      });
+      const logger = error.status >= 500 ? console.error : console.warn;
+      logger("[campaign:start:blocked]", {
+        ...logPayload,
+        status: error.status,
+        message: error.message,
+      });
+    } else {
+      console.error("[campaign:start:blocked]", {
+        campaignId: campaignIdForFailure,
+        mandateId: mandateIdForFailure,
+        reason: "UNEXPECTED_ERROR",
+        message: error instanceof Error ? error.message : "unknown",
+      });
+    }
 
     return apiError(error);
   }

@@ -1,11 +1,18 @@
 export const TEMPLATE_NOT_APPROVED = "TEMPLATE_NOT_APPROVED";
 export const WHATSAPP_TEST_TEMPLATE = "hello_world";
 
-function getApprovedTemplateNames() {
+export function getApprovedTemplateNames() {
   return (process.env.WHATSAPP_APPROVED_TEMPLATES ?? "")
     .split(",")
     .map((template) => template.trim())
     .filter(Boolean);
+}
+
+export function getApprovedTemplateConfigSummary() {
+  return {
+    configured: getApprovedTemplateNames().length > 0,
+    count: getApprovedTemplateNames().length,
+  };
 }
 
 export function isApprovedTemplate(templateName: string): boolean {

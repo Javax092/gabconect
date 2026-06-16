@@ -112,7 +112,7 @@ const REFRESH_INTERVAL_MS = 20000;
 
 export function CampaignInfrastructurePanels(initialSnapshot: InfrastructurePanelsProps) {
   const [snapshot, setSnapshot] = useState<SnapshotState>(initialSnapshot);
-  const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   useEffect(() => {
     setSnapshot(initialSnapshot);
@@ -138,7 +138,7 @@ export function CampaignInfrastructurePanels(initialSnapshot: InfrastructurePane
           logs: data.logs,
           campaigns: data.campaigns
         });
-        setLastUpdated(new Date());
+        setLastUpdated(new Date().toISOString());
       } catch {
         return;
       }
@@ -169,7 +169,7 @@ export function CampaignInfrastructurePanels(initialSnapshot: InfrastructurePane
                 command center
               </span>
               <span className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
-                atualizado {formatTime(lastUpdated)}
+                atualizado {lastUpdated ? formatTime(lastUpdated) : "apos carregar"}
               </span>
             </div>
 

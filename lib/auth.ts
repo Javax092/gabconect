@@ -104,10 +104,14 @@ export async function getSession() {
 
     return session;
   } catch (error) {
-    console.warn("[auth] getSession: token invalido", {
+    const reason = error instanceof Error ? error.message : "unknown";
+
+    console.warn("[auth:session_invalid]", {
       cookieName: SESSION_COOKIE,
-      reason: error instanceof Error ? error.message : "unknown"
+      reason,
+      action: "clearing_cookie"
     });
+    cookieStore.delete(SESSION_COOKIE);
     return null;
   }
 }

@@ -62,7 +62,11 @@ async function hasValidSessionToken(token: string) {
     }
 
     return await verifyHs256Signature(token, secret);
-  } catch {
+  } catch (error) {
+    console.warn("[middleware] sessao invalida", {
+      cookieName: SESSION_COOKIE,
+      reason: error instanceof Error ? error.message : "unknown"
+    });
     return false;
   }
 }

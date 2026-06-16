@@ -20,11 +20,14 @@ import {
   WhatsAppApiError,
   assertWhatsAppReadyForRealSend,
   buildWhatsAppTemplateComponents,
+  getWhatsAppAccessToken,
   sendWhatsAppTemplateRequest
 } from "@/lib/whatsapp";
 import { normalizePhone } from "@/lib/whatsapp-campaigns";
 import {
   WHATSAPP_TEST_TEMPLATE,
+  getApprovedTemplateNames,
+  getApprovedTemplateConfigSummary,
   validateApprovedTemplateForRealSend
 } from "@/lib/whatsapp/templates";
 import { isWhatsAppTestBypassAllowed } from "@/lib/whatsapp-test-bypass";
@@ -33,13 +36,17 @@ export const runtime = "nodejs";
 
 function assertMetaConfigForRealSend() {
   const missing = [
-    "WHATSAPP_ACCESS_TOKEN",
-    "WHATSAPP_PHONE_NUMBER_ID",
-    "WHATSAPP_BUSINESS_ACCOUNT_ID",
-    "WHATSAPP_API_VERSION"
-  ].filter((key) => !process.env[key]);
+    ...(!getWhatsAppAccessToken() ? ["WHATSAPP_TOKEN"] : []),
+    ...(!process.env.WHATSAPP_PHONE_NUMBER_ID ? ["WHATSAPP_PHONE_NUMBER_ID"] : []),
+    ...(!process.env.WHATSAPP_BUSINESS_ACCOUNT_ID ? ["WHATSAPP_BUSINESS_ACCOUNT_ID"] : []),
+    ...(!process.env.WHATSAPP_API_VERSION ? ["WHATSAPP_API_VERSION"] : [])
+  ];
 
   if (missing.length > 0) {
+    console.warn("[whatsapp:test-send:blocked]", {
+      reason: "WHATSAPP_META_CONFIG_MISSING",
+      missing,
+    });
     throw new ApiRouteError(
       409,
       `Configuração Meta ausente para envio real: ${missing.join(", ")}. Mantenha WHATSAPP_DRY_RUN="true" até homologar.`,
@@ -64,8 +71,6 @@ export async function POST(request: Request) {
         envInternalToken &&
         internalToken === envInternalToken
     );
-    console.log("WHATSAPP_DRY_RUN RAW:", process.env.WHATSAPP_DRY_RUN);
-    console.log("DRY RUN ENABLED:", isWhatsAppDryRunEnabled());
     const dryRun = isWhatsAppDryRunEnabled();
 
     const user = isInternalTest
@@ -96,6 +101,19 @@ export async function POST(request: Request) {
         ? body.templateName.trim()
         : null;
 
+    console.info("[whatsapp:test-send:validation]", {
+      dryRun,
+      internalTest: isInternalTest,
+      requestedTemplateName,
+      approvedTemplates: getApprovedTemplateConfigSummary(),
+      metaConfig: {
+        accessTokenConfigured: Boolean(getWhatsAppAccessToken()),
+        phoneNumberIdConfigured: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
+        businessAccountIdConfigured: Boolean(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID),
+        apiVersionConfigured: Boolean(process.env.WHATSAPP_API_VERSION),
+      },
+    });
+
     if (!confirmed) {
       throw new ApiRouteError(
         400,
@@ -107,6 +125,7 @@ export async function POST(request: Request) {
     const recipientPhone = normalizePhone(
       process.env.WHATSAPP_TEST_RECIPIENT_PHONE || user.mandate.whatsappNumber
     );
+    const approvedTemplateNames = getApprovedTemplateNames();
 
     if (!recipientPhone) {
       throw new ApiRouteError(
@@ -134,7 +153,11 @@ export async function POST(request: Request) {
         where: {
           mandateId,
           status: WhatsAppTemplateStatus.APPROVED,
-          ...(requestedTemplateName ? { metaTemplateName: requestedTemplateName } : {})
+          ...(requestedTemplateName
+            ? { metaTemplateName: requestedTemplateName }
+            : approvedTemplateNames.length > 0
+              ? { metaTemplateName: { in: approvedTemplateNames } }
+              : {})
         },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         select: {
@@ -149,6 +172,10 @@ export async function POST(request: Request) {
     ]);
 
     if (!contact) {
+      console.warn("[whatsapp:test-send:blocked]", {
+        reason: "TEST_CONTACT_NOT_OPTED_IN",
+        phone: redactPhone(recipientPhone),
+      });
       throw new ApiRouteError(
         400,
         "Cadastre o telefone de teste como contato ativo com opt-in antes de enviar.",
@@ -170,6 +197,10 @@ export async function POST(request: Request) {
         : null);
 
     if (!templateForSend) {
+      console.warn("[whatsapp:test-send:blocked]", {
+        reason: "APPROVED_TEMPLATE_MISSING",
+        requestedTemplateName,
+      });
       throw new ApiRouteError(
         400,
         requestedTemplateName
@@ -188,7 +219,7 @@ export async function POST(request: Request) {
     const phoneForSend = normalizePhone(contact.phone);
     const templateValidation = validateApprovedTemplateForRealSend(templateNameForSend);
 
-    console.info("[whatsapp:test-send:template_validation]", {
+    console.info("[whatsapp:test-send:validation]", {
       templateName: templateNameForSend,
       dryRun,
       approved: templateValidation.approved,
@@ -197,13 +228,18 @@ export async function POST(request: Request) {
     });
 
     if (!dryRun && !templateValidation.allowed) {
+      console.warn("[whatsapp:test-send:blocked]", {
+        reason: "TEMPLATE_NOT_APPROVED",
+        templateName: templateNameForSend,
+        approvedTemplates: getApprovedTemplateConfigSummary(),
+      });
       throw new ApiRouteError(
-        400,
-        "Template não aprovado na Meta. Use um template aprovado ou hello_world para teste.",
+        409,
+        "Template não aprovado em WHATSAPP_APPROVED_TEMPLATES.",
         "TEMPLATE_NOT_APPROVED",
         {
           templateName: templateNameForSend,
-          suggestion: "Use hello_world em ambiente de teste.",
+          suggestion: `Inclua ${templateNameForSend} em WHATSAPP_APPROVED_TEMPLATES ou use ${WHATSAPP_TEST_TEMPLATE}.`,
         }
       );
     }
@@ -240,7 +276,8 @@ export async function POST(request: Request) {
           });
 
       if (!bypass.allowed) {
-        console.warn("[whatsapp:test-send:bypass-denied]", {
+        console.warn("[whatsapp:test-send:blocked]", {
+          reason: "SEND_GATE_BLOCKED",
           gateReason: gate.reason,
           bypassReason: bypass.reason,
           phone: redactPhone(phoneForSend),
@@ -335,6 +372,14 @@ export async function POST(request: Request) {
 
       invalidateWhatsAppOperationalCache(mandateId);
 
+      console.info("[whatsapp:test-send:success]", {
+        mode: "REAL",
+        mandateId,
+        contactId: contact.id,
+        templateName: templateNameForSend,
+        providerMessageId: sent.providerMessageId,
+      });
+
       return apiSuccess({
         data: {
           mode: "REAL",
@@ -378,6 +423,13 @@ export async function POST(request: Request) {
         }
       });
 
+      console.info("[whatsapp:test-send:success]", {
+        mode: "SIMULACAO",
+        mandateId,
+        contactId: contact.id,
+        templateName: templateNameForSend,
+      });
+
       return apiSuccess({
         data: {
           mode: "SIMULACAO",
@@ -389,6 +441,23 @@ export async function POST(request: Request) {
 
     throw new ApiRouteError(500, "Fluxo de envio real não finalizado.", "WHATSAPP_TEST_SEND_FAILED");
   } catch (error) {
+    if (error instanceof WhatsAppApiError) {
+      console.error("[whatsapp:test-send:meta_error]", {
+        status: error.status,
+        code: error.code,
+        retryable: error.retryable,
+        message: error.message,
+        details: error.details,
+      });
+    } else if (error instanceof ApiRouteError) {
+      console.warn("[whatsapp:test-send:blocked]", {
+        status: error.status,
+        code: error.code,
+        message: error.message,
+        details: error.details,
+      });
+    }
+
     return apiError(
       error instanceof ApiRouteError
         ? error

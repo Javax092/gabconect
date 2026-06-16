@@ -11,6 +11,7 @@ import { isAudienceValidationBypassed } from "@/lib/audience-validation";
 import { validateConversationWindow } from "@/lib/compliance";
 import { getCampaignModeDailyCap, getSendLimitConfig, isMassCampaignEnabled } from "@/lib/mass-campaign-config";
 import { prisma } from "@/lib/prisma";
+import { getWhatsAppAccessToken } from "@/lib/whatsapp";
 import { assertRedisRateLimit } from "@/lib/redis-rate-limit";
 import { recordSendAttempt } from "@/lib/send-attempts";
 
@@ -333,7 +334,7 @@ export async function runSendGate(input: SendGateContext): Promise<SendGateResul
     return block(input, phone, input.contactId ?? null, SendAttemptStatus.BLOCKED, "Fora do horário permitido de envio.");
   }
 
-  if (!input.dryRun && (!process.env.WHATSAPP_ACCESS_TOKEN || !process.env.WHATSAPP_PHONE_NUMBER_ID)) {
+  if (!input.dryRun && (!getWhatsAppAccessToken() || !process.env.WHATSAPP_PHONE_NUMBER_ID)) {
     return block(input, phone, input.contactId ?? null, SendAttemptStatus.BLOCKED, "WhatsApp Cloud API não configurada.");
   }
 

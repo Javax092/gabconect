@@ -14,14 +14,24 @@ async function readApiMessage(response: Response) {
   const payload = (await response.json().catch(() => null)) as
     | {
         message?: string;
+        code?: string;
+        reason?: string;
         error?: {
+          code?: string;
           message?: string;
+          details?: {
+            reason?: string;
+          };
         };
       }
     | null;
 
   if (!response.ok) {
-    return payload?.error?.message ?? "Operação não concluída.";
+    const code = payload?.error?.code ?? payload?.code;
+    const reason = payload?.error?.details?.reason ?? payload?.reason;
+    const message = payload?.error?.message ?? payload?.message ?? "Operação não concluída.";
+
+    return [code, message, reason].filter(Boolean).join(" - ");
   }
 
   return payload?.message ?? "Operação concluída.";

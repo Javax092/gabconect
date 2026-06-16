@@ -65,6 +65,10 @@ function getWhatsAppGraphVersion() {
   return process.env.WHATSAPP_API_VERSION?.trim() || DEFAULT_WHATSAPP_GRAPH_VERSION;
 }
 
+export function getWhatsAppAccessToken() {
+  return process.env.WHATSAPP_ACCESS_TOKEN?.trim() || process.env.WHATSAPP_TOKEN?.trim() || null;
+}
+
 const PERMANENT_META_ERROR_CODES = new Set([
   100,
   131026,
@@ -129,12 +133,12 @@ function redactPhone(phone: string) {
 }
 
 function getWhatsAppConfig() {
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = getWhatsAppAccessToken();
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
 
   if (!accessToken || !phoneNumberId) {
     throw new Error(
-      "Configuração do WhatsApp ausente: defina WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID."
+      "Configuração do WhatsApp ausente: defina WHATSAPP_TOKEN ou WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID."
     );
   }
 
@@ -143,7 +147,7 @@ function getWhatsAppConfig() {
 
 export function getWhatsAppCredentialSummary() {
   return {
-    accessToken: maskSecret(process.env.WHATSAPP_ACCESS_TOKEN),
+    accessToken: maskSecret(getWhatsAppAccessToken()),
     phoneNumberId: maskSecret(process.env.WHATSAPP_PHONE_NUMBER_ID),
     businessAccountId: maskSecret(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID),
     apiVersion: getWhatsAppGraphVersion(),
@@ -359,7 +363,7 @@ export async function fetchMetaWhatsAppTemplates(input?: {
   status?: "APPROVED";
   name?: string;
 }) {
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN?.trim();
+  const accessToken = getWhatsAppAccessToken();
   const businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID?.trim();
   const apiVersion = getWhatsAppGraphVersion();
 
@@ -369,7 +373,7 @@ export async function fetchMetaWhatsAppTemplates(input?: {
       retryable: false,
       details: {
         missing: [
-          ...(!accessToken ? ["WHATSAPP_ACCESS_TOKEN"] : []),
+          ...(!accessToken ? ["WHATSAPP_TOKEN"] : []),
           ...(!businessAccountId ? ["WHATSAPP_BUSINESS_ACCOUNT_ID"] : [])
         ]
       }
@@ -524,14 +528,14 @@ export async function getWhatsAppHealthCheck(input?: {
   category?: string | null;
   localBody?: string | null;
 }) {
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN?.trim();
+  const accessToken = getWhatsAppAccessToken();
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
   const businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID?.trim();
   const configuredApiVersion = process.env.WHATSAPP_API_VERSION?.trim();
   const apiVersion = getWhatsAppGraphVersion();
   const dryRun = process.env.WHATSAPP_DRY_RUN?.trim().toLowerCase() === "true";
   const missingCore = [
-    ["WHATSAPP_ACCESS_TOKEN", accessToken],
+    ["WHATSAPP_TOKEN", accessToken],
     ["WHATSAPP_PHONE_NUMBER_ID", phoneNumberId],
     ["WHATSAPP_API_VERSION", configuredApiVersion]
   ]
