@@ -11,6 +11,7 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { isApprovedTemplate } from "@/lib/whatsapp/templates";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_WINDOW_DAYS = 7;
@@ -178,12 +179,17 @@ function estimateSensitivity(input: {
 
 function estimateTemplateQuality(input: {
   templateStatus: WhatsAppTemplateStatus;
+  templateOperationallyApproved?: boolean;
   templateBody: string;
   failureRate: number;
   criticalEvents: number;
   optOuts: number;
 }) {
-  let score = input.templateStatus === WhatsAppTemplateStatus.APPROVED ? 84 : 35;
+  let score =
+    input.templateStatus === WhatsAppTemplateStatus.APPROVED ||
+    input.templateOperationallyApproved
+      ? 84
+      : 35;
 
   if (input.templateBody.trim().length < 80) {
     score -= 8;
@@ -560,6 +566,11 @@ export async function runCampaignSafetySimulation(input: {
     selectedContactIds: []
   };
   const audienceTerms = getAudienceTerms(audienceConfig);
+  const selectedContactIds = audienceConfig.selectedContactIds ?? [];
+  const isSmallManualTest =
+    campaign.campaignMode === "TEST" &&
+    selectedContactIds.length > 0 &&
+    selectedContactIds.length <= 5;
   const since24h = getWindowStart(1);
   const sinceRecent = getWindowStart(RECENT_WINDOW_DAYS);
 
@@ -640,8 +651,12 @@ export async function runCampaignSafetySimulation(input: {
     audienceTerms,
     templateCategory: campaign.template.category
   });
+  const templateOperationallyApproved =
+    campaign.template.status === WhatsAppTemplateStatus.APPROVED ||
+    isApprovedTemplate(campaign.template.metaTemplateName);
   const templateQuality = estimateTemplateQuality({
     templateStatus: campaign.template.status,
+    templateOperationallyApproved,
     templateBody: campaign.template.body,
     failureRate: failureRate24h,
     criticalEvents: recentBlocks,
@@ -664,6 +679,30 @@ export async function runCampaignSafetySimulation(input: {
   safetyScore -= engine.trustRecoveryState?.status === TrustRecoveryStatus.ACTIVE ? 18 : 0;
   safetyScore -= sensitivity === "high" ? 10 : sensitivity === "medium" ? 4 : 0;
   safetyScore -= profile.warmingStage === CampaignWarmupStage.DAY_1 ? 8 : profile.warmingStage === CampaignWarmupStage.DAY_2 ? 4 : 0;
+
+  const selectedTestHasInvalidConsent =
+    isSmallManualTest && (totalContacts === 0 || optedInContacts !== totalContacts);
+  const selectedTestHasTemplateBlock = isSmallManualTest && !templateOperationallyApproved;
+  const selectedTestHasCriticalOperationalBlock =
+    profile.reputationScore < 60 ||
+    engine.trustRecoveryState?.status === TrustRecoveryStatus.ACTIVE ||
+    selectedTestHasInvalidConsent ||
+    selectedTestHasTemplateBlock;
+
+  if (isSmallManualTest && !selectedTestHasCriticalOperationalBlock) {
+    safetyScore = Math.max(safetyScore, sensitivity === "high" ? 62 : 72);
+  }
+
+  if (
+    campaign.campaignMode === "TEST" &&
+    (selectedContactIds.length === 0 ||
+      selectedContactIds.length > 5 ||
+      selectedTestHasInvalidConsent ||
+      selectedTestHasTemplateBlock)
+  ) {
+    safetyScore = Math.min(safetyScore, 44);
+  }
+
   safetyScore = clamp(safetyScore, 10, 99);
 
   const riskLevel = getRiskLevelFromScore(safetyScore);
@@ -736,6 +775,28 @@ export async function runCampaignSafetySimulation(input: {
 
   if (optedInContacts > profile.safeThroughput * 4) {
     warnings.push("O tamanho da audiencia excede o throughput seguro atual e exige fracionamento.");
+  }
+
+  if (campaign.campaignMode === "TEST") {
+    if (selectedContactIds.length === 0) {
+      blockingReasons.push("Campanha TEST sem contatos selecionados.");
+      recommendations.push("Selecionar ate 5 contatos elegiveis para teste controlado.");
+    } else if (selectedContactIds.length > 5) {
+      blockingReasons.push("Campanha TEST excede o limite seguro de 5 contatos selecionados.");
+      recommendations.push("Reduzir a selecao de teste ou usar modo de audiencia com preflight completo.");
+    } else {
+      recommendations.push("TEST manual pequeno tratado como envio controlado, sem regra de volume massivo.");
+    }
+
+    if (selectedTestHasInvalidConsent) {
+      blockingReasons.push("TEST possui contato selecionado sem opt-in ativo, bloqueado, invalido ou inexistente.");
+      recommendations.push("Remover contatos inelegiveis antes de iniciar o teste.");
+    }
+
+    if (selectedTestHasTemplateBlock) {
+      blockingReasons.push("Template do TEST nao esta aprovado localmente nem listado em WHATSAPP_APPROVED_TEMPLATES.");
+      recommendations.push("Usar template aprovado antes de iniciar campanha TEST.");
+    }
   }
 
   if (sensitivity === "high") {

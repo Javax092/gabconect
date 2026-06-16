@@ -15,11 +15,32 @@ const campaignModes = ["TEST", "BIRTHDAY", "AUDIENCE"] as const;
 
 export type CampaignMode = (typeof campaignModes)[number];
 
+const audienceConfigSchema = z
+  .object({
+    birthdayMonthDay: z
+      .string()
+      .regex(/^\d{2}-\d{2}$/, "Formato deve ser MM-DD")
+      .optional()
+      .nullable(),
+    tags: z.array(z.string().trim().min(1)).max(20).optional().default([]),
+    groups: z.array(z.string().trim().min(1)).max(20).optional().default([]),
+    priorities: z.array(z.string().trim().min(1)).max(20).optional().default([]),
+    locations: z.array(z.string().trim().min(1)).max(20).optional().default([]),
+    interests: z.array(z.string().trim().min(1)).max(20).optional().default([]),
+    contactTypes: z.array(z.string().trim().min(1)).max(20).optional().default([]),
+    selectedContactIds: z.array(z.string().cuid()).max(1000).optional().default([]),
+  })
+  .optional();
+
 export const campaignSchema = z
   .object({
     name: z.string().trim().min(3, "Informe um nome para a campanha."),
     templateId: z.string().cuid("Selecione um template válido."),
     campaignMode: z.enum(campaignModes).optional().default("TEST"),
+    source: z.string().trim().max(80).optional(),
+    action: z.string().trim().max(80).optional(),
+    confirmedAudience: z.boolean().optional(),
+    audienceConfig: audienceConfigSchema,
     selectedContactIds: z.array(z.string().cuid()).max(1000).default([]),
     segmentTags: z.array(z.string().trim().min(1)).max(20).default([]),
     groups: z.array(z.string().trim().min(1)).max(20).default([]),

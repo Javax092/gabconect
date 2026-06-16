@@ -59,7 +59,18 @@ export async function GET(request: Request) {
             audienceConfig: true
           }
         })
-      : null;
+        : null;
+    const selectedContactIds = [
+      ...new Set([
+        ...(campaign?.audienceConfig?.selectedContactIds ??
+          filters.selectedContactIds ??
+          []),
+        ...(audienceFilter.selectedContactIds ?? [])
+      ])
+    ];
+    const selectedOnly = campaign
+      ? selectedContactIds.length > 0
+      : filters.selectedOnly && selectedContactIds.length > 0;
 
     const template = campaign
       ? campaign.template
@@ -87,9 +98,12 @@ export async function GET(request: Request) {
             contactTypes: campaign.audienceConfig.contactTypes,
             selectedContactIds: campaign.audienceConfig.selectedContactIds
           }
-        : audienceFilter,
-      selectedContactIds: campaign?.audienceConfig?.selectedContactIds ?? filters.selectedContactIds,
-      selectedOnly: campaign ? (campaign.audienceConfig?.selectedContactIds.length ?? 0) > 0 : filters.selectedOnly,
+        : {
+            ...audienceFilter,
+            selectedContactIds
+          },
+      selectedContactIds,
+      selectedOnly,
       showOnlyEligible: false,
       query: filters.query,
       optInFilter: filters.optInFilter,
@@ -99,6 +113,15 @@ export async function GET(request: Request) {
       limit: filters.limit,
       sortBy: filters.sortBy,
       sortOrder: filters.sortOrder
+    });
+
+    console.info("[campaign:audience-preview]", {
+      campaignId: campaign?.id ?? null,
+      selectedOnly,
+      selectedContactCount: selectedContactIds.length,
+      returnedMatched: preview.totalMatched,
+      returnedEligible: preview.totalElegiveis,
+      campaignMode: campaign?.campaignMode ?? null
     });
 
     if (campaign) {

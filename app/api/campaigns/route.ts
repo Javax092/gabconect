@@ -31,6 +31,28 @@ function normalizeTags(values: string[]) {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
+function readBodyObject(body: unknown) {
+  return body && typeof body === "object" && !Array.isArray(body)
+    ? (body as Record<string, unknown>)
+    : {};
+}
+
+function readNestedObject(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function readString(value: unknown) {
+  return typeof value === "string" ? value : undefined;
+}
+
 function buildStatsMap(
   rows: Array<{
     campaignId: string;
@@ -173,33 +195,55 @@ export async function POST(request: Request) {
 
     const user = await requireAuth();
     const { mandateId } = getMandateContext(user);
-    const body = await readJson(request);
-    console.log("[CREATE RAW BODY]", JSON.stringify(body, null, 2));
+    const rawBody = readBodyObject(await readJson(request));
+    const rawAudienceConfig = readNestedObject(rawBody.audienceConfig);
+    const requestedMode = readString(rawBody.campaignMode);
+    const source = readString(rawBody.source);
+    const action = readString(rawBody.action);
+    const birthdayMonthDay =
+      readString(rawBody.birthdayMonthDay) ??
+      readString(rawAudienceConfig.birthdayMonthDay) ??
+      null;
+    const selectedContactIds = [
+      ...new Set([
+        ...readStringArray(rawBody.selectedContactIds),
+        ...readStringArray(rawAudienceConfig.selectedContactIds),
+      ]),
+    ];
+    const manualTestIntent =
+      selectedContactIds.length > 0 &&
+      (requestedMode === undefined ||
+        requestedMode === "TEST" ||
+        action === "manual-test" ||
+        source === "campaign-wizard");
 
-    console.info("[CREATE RAW BODY]", body);
-
-    const parsed = validateSchema(campaignSchema, body);
-    console.log("[CREATE PARSED]", {
-      campaignMode: parsed.campaignMode,
-      birthdayMonthDay: parsed.birthdayMonthDay,
-      selectedContactIds: parsed.selectedContactIds,
+    console.info("[campaign:create:payload]", {
+      requestedMode: requestedMode ?? null,
+      templateId: readString(rawBody.templateId) ?? null,
+      selectedContactCount: selectedContactIds.length,
+      hasAudienceConfig: Object.keys(rawAudienceConfig).length > 0,
+      birthdayMonthDay,
+      source: source ?? null,
+      action: action ?? null,
     });
 
-    console.info("[CREATE PARSED]", {
-      campaignMode: parsed.campaignMode,
-      name: parsed.name,
-      selectedContactIds: parsed.selectedContactIds,
-      birthdayMonthDay: parsed.birthdayMonthDay,
-      segmentTags: parsed.segmentTags,
-    });
-
-    console.info("[campaign-create] endpoint-entered", {
-      mandateId,
-      campaignMode: parsed.campaignMode,
-      name: parsed.name,
-      templateId: parsed.templateId,
-      selectedContactIds: parsed.selectedContactIds?.length ?? 0,
-      birthdayMonthDay: parsed.birthdayMonthDay ?? null,
+    const parsed = validateSchema(campaignSchema, {
+      ...rawBody,
+      campaignMode: manualTestIntent ? "TEST" : rawBody.campaignMode,
+      birthdayMonthDay,
+      selectedContactIds,
+      segmentTags:
+        rawBody.segmentTags ?? rawAudienceConfig.tags ?? rawBody.tags ?? [],
+      groups: rawBody.groups ?? rawAudienceConfig.groups ?? [],
+      priorities: rawBody.priorities ?? rawAudienceConfig.priorities ?? [],
+      locations: rawBody.locations ?? rawAudienceConfig.locations ?? [],
+      interests: rawBody.interests ?? rawAudienceConfig.interests ?? [],
+      contactTypes: rawBody.contactTypes ?? rawAudienceConfig.contactTypes ?? [],
+      audienceConfig: {
+        ...rawAudienceConfig,
+        birthdayMonthDay,
+        selectedContactIds,
+      },
     });
 
     const template = await prisma.whatsAppTemplate.findFirst({
@@ -218,10 +262,8 @@ export async function POST(request: Request) {
       );
     }
 
-    // Ensure campaign mode is set (defaults to TEST from zod schema)
     const campaignMode = parsed.campaignMode ?? "TEST";
 
-    // Resolve audience filter by campaign mode - this ensures clean state
     const resolvedAudience = resolveAudienceFilterByMode({
       mode: campaignMode,
       selectedContactIds: parsed.selectedContactIds,
@@ -234,23 +276,9 @@ export async function POST(request: Request) {
       contactTypes: parsed.contactTypes,
     });
 
-    console.log("[CREATE RESOLVED]", resolvedAudience);
-
-    console.info("[CREATE RESOLVED]", {
-      campaignMode,
-      birthdayMonthDay: resolvedAudience.birthdayMonthDay,
-      selectedContactIds: resolvedAudience.selectedContactIds,
-      tags: resolvedAudience.tags,
-      groups: resolvedAudience.groups,
-      priorities: resolvedAudience.priorities,
-      locations: resolvedAudience.locations,
-      interests: resolvedAudience.interests,
-      contactTypes: resolvedAudience.contactTypes,
-    });
-
     console.info("[campaign-create] audience-resolved-by-mode", {
       mandateId,
-      campaignMode: parsed.campaignMode,
+      campaignMode,
       selectedContactIds: resolvedAudience.selectedContactIds.length,
       birthdayMonthDay: resolvedAudience.birthdayMonthDay,
       hasAudienceFilters:
@@ -312,27 +340,14 @@ export async function POST(request: Request) {
       },
     });
 
-    console.log("[CREATE SAVED]", {
-      campaignMode: campaign.campaignMode,
-      birthdayMonthDay: campaign.audienceConfig?.birthdayMonthDay,
-      selectedContactIds: campaign.audienceConfig?.selectedContactIds,
-    });
-
     console.info("[campaign-create] success", {
       mandateId,
       campaignId: campaign.id,
+      templateId: campaign.templateId,
       campaignMode: campaign.campaignMode,
       selectedContactIds:
         campaign.audienceConfig?.selectedContactIds?.length ?? 0,
       status: campaign.status,
-    });
-
-    console.info("[CREATE SAVED]", {
-      campaignId: campaign.id,
-      campaignMode: campaign.campaignMode,
-      birthdayMonthDay: campaign.audienceConfig?.birthdayMonthDay,
-      selectedContactIds: campaign.audienceConfig?.selectedContactIds,
-      audienceConfig: campaign.audienceConfig,
     });
 
     await syncCampaignOperationState(campaign.id);

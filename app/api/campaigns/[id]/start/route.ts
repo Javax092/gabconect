@@ -179,11 +179,35 @@ export async function POST(request: Request, context: RouteContext) {
       showOnlyEligible: false,
     });
 
+    console.info("[campaign:start:resolved]", {
+      campaignId: campaign.id,
+      campaignMode: campaign.campaignMode,
+      templateName: campaign.template.metaTemplateName,
+      templateId: campaign.template.id,
+      selectedContactCount: selectedContactIds.length,
+      selectedOnly: isManualSelection,
+      birthdayMonthDay: audienceFilter.birthdayMonthDay ?? null,
+      audienceMatched: audiencePreview.totalMatched,
+      audienceEligible: audiencePreview.totalElegiveis,
+    });
+
     if (campaign.campaignMode === "TEST" && selectedContactIds.length === 0) {
       throw new ApiRouteError(
         400,
         "Selecione pelo menos um contato para o modo TEST.",
         "TEST_NO_SELECTED_CONTACTS",
+      );
+    }
+
+    if (campaign.campaignMode === "TEST" && selectedContactIds.length > 5) {
+      throw new ApiRouteError(
+        409,
+        "Campanha TEST limitada a 5 contatos selecionados.",
+        "TEST_TOO_MANY_SELECTED_CONTACTS",
+        {
+          selectedContactIds: selectedContactIds.length,
+          maxSelectedContactIds: 5,
+        },
       );
     }
 
@@ -222,7 +246,7 @@ export async function POST(request: Request, context: RouteContext) {
       modeDailyCap: getCampaignModeDailyCap(campaign.campaignMode),
     };
 
-    if (!isMassCampaignEnabled()) {
+    if (!isMassCampaignEnabled() && campaign.campaignMode !== "TEST") {
       throw new ApiRouteError(
         409,
         "Campanhas em massa desabilitadas.",
@@ -246,6 +270,22 @@ export async function POST(request: Request, context: RouteContext) {
       persist: true,
     });
 
+    console.log("[campaign:risk:evaluation]", {
+      campaignId: campaign.id,
+      campaignMode: campaign.campaignMode,
+      status: campaign.status,
+      templateName: campaign.template?.metaTemplateName,
+      templateStatus: campaign.template?.status,
+      audienceMatched: audiencePreview.totalMatched,
+      audienceEligible: audiencePreview.totalElegiveis,
+      audienceBlocked: audiencePreview.totalBloqueados,
+      audienceOptOut: audiencePreview.totalOptOut,
+      riskLevel: simulation.riskLevel,
+      safetyScore: simulation.safetyScore,
+      blockingReasons: simulation.blockingReasons,
+      recommendations: simulation.recommendations,
+    });
+
     if (simulation.riskLevel === "CRITICAL") {
       await prisma.campaign.update({
         where: { id: campaign.id },
@@ -254,8 +294,25 @@ export async function POST(request: Request, context: RouteContext) {
 
       throw new ApiRouteError(
         409,
-        "Bloqueado por risco crítico.",
+        "Bloqueado por risco crítico. Verifique os motivos da simulação de segurança.",
         "CRITICAL_RISK_BLOCKED",
+        {
+          riskLevel: simulation.riskLevel,
+          safetyScore: simulation.safetyScore,
+          blockingReasons: simulation.blockingReasons,
+          recommendations: simulation.recommendations,
+          audience: {
+            totalMatched: audiencePreview.totalMatched,
+            totalEligible: audiencePreview.totalElegiveis,
+            totalBlocked: audiencePreview.totalBloqueados,
+            totalOptOut: audiencePreview.totalOptOut,
+          },
+          template: {
+            name: campaign.template?.metaTemplateName,
+            status: campaign.template?.status,
+            language: campaign.template?.language,
+          },
+        },
       );
     }
 

@@ -62,6 +62,7 @@ type PreflightCheckModalProps = {
   } | null;
   campaignName: string | null;
   templateName: string | null;
+  campaignMode: string | null;
   confirmed: boolean;
   onClose: () => void;
   onStart: () => void;
@@ -88,6 +89,7 @@ export function PreflightCheckModal({
   audiencePreview,
   campaignName,
   templateName,
+  campaignMode,
   modeLabel,
   confirmed,
   onClose,
@@ -177,6 +179,7 @@ export function PreflightCheckModal({
 
               <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                 <MetaCard label="Operação" value={campaignName ?? "Campanha"} />
+                <MetaCard label="Tipo da campanha" value={campaignMode ?? "TEST"} />
                 <MetaCard label="Template oficial" value={templateName ?? "Template"} />
                 <MetaCard
                   label="Delay humano"
@@ -195,6 +198,11 @@ export function PreflightCheckModal({
               <p className="mt-4 text-sm text-slate-300">
                 Destinatários selecionados manualmente não dependem dos filtros da campanha.
               </p>
+              {campaignMode === "BIRTHDAY" ? (
+                <p className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-50">
+                  Esta campanha usa o fluxo de aniversario. Confira se o template e a audiencia sao de aniversariantes antes de iniciar.
+                </p>
+              ) : null}
 
               {audienceLoading ? (
                 <div className="mt-4 text-sm text-slate-300">Carregando destinatários previstos...</div>

@@ -52,6 +52,7 @@ type CampaignItem = {
   id: string;
   name: string;
   templateId: string;
+  campaignMode: "TEST" | "BIRTHDAY" | "AUDIENCE";
   segmentTags: string[];
   audienceConfig: AudienceConfig | null;
   audience?: string[];
@@ -128,7 +129,49 @@ type SimulationResponse = {
       qualityRating: string;
     };
   };
+  canStart?: boolean;
+  riskLevel?: string;
+  safetyScore?: number;
+  blockingReasons?: string[];
+  recommendations?: string[];
+  audience?: CampaignStartBlockDetails["audience"];
+  template?: CampaignStartBlockDetails["template"];
+  envReadiness?: {
+    ready: boolean;
+    dryRun: boolean;
+    whatsappAccessTokenConfigured: boolean;
+    whatsappPhoneNumberIdConfigured: boolean;
+    massCampaignEnabled: boolean;
+    missing: string[];
+  };
   message?: string;
+};
+
+type CampaignStartBlockDetails = {
+  riskLevel?: string;
+  safetyScore?: number;
+  blockingReasons?: string[];
+  recommendations?: string[];
+  audience?: {
+    totalMatched?: number;
+    totalEligible?: number;
+    totalBlocked?: number;
+    totalOptOut?: number;
+  };
+  template?: {
+    name?: string;
+    status?: string;
+    language?: string;
+  };
+};
+
+type ApiErrorResponse = {
+  message?: string;
+  error?: {
+    code?: string;
+    message?: string;
+    details?: CampaignStartBlockDetails;
+  };
 };
 
 type CampaignsManagerProps = {
@@ -146,6 +189,34 @@ type CampaignsManagerProps = {
     maxConsecutiveFailures: number;
   };
 };
+
+function formatCampaignStartError(data: ApiErrorResponse, fallback: string) {
+  const message = getApiErrorMessage(data, fallback);
+  const details = data.error?.details;
+
+  if (data.error?.code !== "CRITICAL_RISK_BLOCKED" || !details) {
+    return message;
+  }
+
+  const parts = [
+    message,
+    `Risco: ${details.riskLevel ?? "N/D"} | Score: ${details.safetyScore ?? "N/D"}`,
+    details.audience
+      ? `Audiência: ${details.audience.totalEligible ?? 0} elegíveis, ${details.audience.totalBlocked ?? 0} bloqueados, ${details.audience.totalOptOut ?? 0} opt-out, ${details.audience.totalMatched ?? 0} encontrados.`
+      : null,
+    details.template
+      ? `Template: ${details.template.name ?? "N/D"} (${details.template.status ?? "N/D"}, ${details.template.language ?? "N/D"}).`
+      : null,
+    details.blockingReasons?.length
+      ? `Motivos: ${details.blockingReasons.join("; ")}`
+      : null,
+    details.recommendations?.length
+      ? `Recomendações: ${details.recommendations.join("; ")}`
+      : null,
+  ].filter(Boolean);
+
+  return parts.join(" ");
+}
 
 type AudiencePreviewRecipient = {
   contactId: string;
@@ -268,6 +339,7 @@ export function CampaignsManager({
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [preflightCampaignName, setPreflightCampaignName] = useState<string | null>(null);
   const [preflightTemplateName, setPreflightTemplateName] = useState<string | null>(null);
+  const [preflightCampaignMode, setPreflightCampaignMode] = useState<string | null>(null);
   const [preflightSimulation, setPreflightSimulation] = useState<SimulationResponse["simulation"] | null>(null);
   const [previewConfirmed, setPreviewConfirmed] = useState(false);
   const [campaignAudiencePreview, setCampaignAudiencePreview] = useState<AudiencePreviewResponse | null>(null);
@@ -471,7 +543,7 @@ export function CampaignsManager({
     }
 
     setBootstrappedPreflight(true);
-    openPreflight(campaign.id, campaign.name, campaign.template.name).catch(() => undefined);
+    openPreflight(campaign.id, campaign.name, campaign.template.name, campaign.campaignMode).catch(() => undefined);
   }, [bootstrappedPreflight, initialPreflightCampaignId, campaigns]);
 
   const visibleCampaigns = useMemo(
@@ -584,7 +656,15 @@ export function CampaignsManager({
         },
         body: JSON.stringify({
           ...form,
+          campaignMode: "TEST",
+          source: "campaign-wizard",
+          action: "manual-test",
           selectedContactIds: audience.selectedContactIds ?? [],
+          audienceConfig: {
+            ...audience,
+            birthdayMonthDay: null,
+            selectedContactIds: audience.selectedContactIds ?? []
+          },
           segmentTags: audience.tags,
           groups: audience.groups,
           priorities: audience.priorities,
@@ -631,10 +711,10 @@ export function CampaignsManager({
       const response = await fetch(`/api/campaigns/${campaignId}/${action}`, {
         method: "POST"
       });
-      const data = (await response.json()) as { message?: string };
+      const data = (await response.json()) as ApiErrorResponse;
 
       if (!response.ok) {
-        setError(getApiErrorMessage(data, "Nao foi possivel executar a acao."));
+        setError(formatCampaignStartError(data, "Nao foi possivel executar a acao."));
         return;
       }
 
@@ -675,10 +755,10 @@ export function CampaignsManager({
           confirmedAudience: true
         })
       });
-      const startData = (await startResponse.json()) as { message?: string };
+      const startData = (await startResponse.json()) as ApiErrorResponse;
 
       if (!startResponse.ok) {
-        setError(getApiErrorMessage(startData, "Nao foi possivel iniciar o teste de aniversario."));
+        setError(formatCampaignStartError(startData, "Nao foi possivel iniciar o teste de aniversario."));
         return;
       }
 
@@ -714,7 +794,7 @@ export function CampaignsManager({
     }
   }
 
-  async function openPreflight(campaignId: string, campaignName: string, templateName?: string) {
+  async function openPreflight(campaignId: string, campaignName: string, templateName?: string, campaignMode?: string) {
     setPreflightOpen(true);
     setPreflightLoading(true);
     setCampaignAudiencePreviewLoading(true);
@@ -724,6 +804,7 @@ export function CampaignsManager({
     setSelectedCampaignId(campaignId);
     setPreflightCampaignName(campaignName);
     setPreflightTemplateName(templateName ?? null);
+    setPreflightCampaignMode(campaignMode ?? null);
     setPreviewConfirmed(false);
     setError(null);
     setFeedback(null);
@@ -814,10 +895,10 @@ export function CampaignsManager({
           confirmedAudience: true
         })
       });
-      const data = (await response.json()) as { message?: string; redirectTo?: string };
+      const data = (await response.json()) as ApiErrorResponse & { redirectTo?: string };
 
       if (!response.ok) {
-        setError(getApiErrorMessage(data, "Nao foi possivel iniciar a campanha."));
+        setError(formatCampaignStartError(data, "Nao foi possivel iniciar a campanha."));
         return;
       }
 
@@ -959,7 +1040,7 @@ export function CampaignsManager({
                           <Button
                             type="button"
                             className="h-9 rounded-xl px-3"
-                            onClick={() => openPreflight(campaign.id, campaign.name, campaign.template.name)}
+                            onClick={() => openPreflight(campaign.id, campaign.name, campaign.template.name, campaign.campaignMode)}
                             disabled={pending || ["RUNNING", "COMPLETED", "CANCELLED"].includes(campaign.status)}
                           >
                             <Play className="h-4 w-4" />
@@ -1207,6 +1288,7 @@ export function CampaignsManager({
               <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
                 <p className="text-sm font-semibold text-slate-950">Resumo</p>
                 <div className="mt-4 grid gap-3 text-sm">
+                  <ReviewLine label="Tipo" value="TEST" />
                   <ReviewLine label="Template" value={templateOptions.find((item) => item.id === form.templateId)?.name ?? "Não selecionado"} />
                   <ReviewLine label="Selecionados" value={String(audience.selectedContactIds?.length ?? 0)} />
                   <ReviewLine label="Elegíveis" value={String(selectedAudiencePreview?.totalElegiveis ?? 0)} />
@@ -1228,8 +1310,12 @@ export function CampaignsManager({
                 <SummaryMetric label="Template" value={templateOptions.find((item) => item.id === form.templateId)?.name ?? "-"} />
                 <SummaryMetric label="Audiência" value={`${audience.selectedContactIds?.length ?? 0} contatos`} />
                 <SummaryMetric label="Elegíveis" value={String(selectedAudiencePreview?.totalElegiveis ?? 0)} />
+                <SummaryMetric label="Tipo" value="TEST" />
                 <SummaryMetric label="Modo" value={deliveryMode} />
               </div>
+              <p className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                Esta campanha sera criada como TEST usando somente os contatos selecionados e o template escolhido acima.
+              </p>
               <div className="mt-5 flex flex-wrap gap-3">
                 <Button
                   type="submit"
@@ -1245,9 +1331,12 @@ export function CampaignsManager({
                   onClick={runBirthdayTestCampaign}
                   disabled={pending || templateOptions.length === 0}
                 >
-                  Envio de teste
+                  Criar teste de aniversario
                 </Button>
               </div>
+              <p className="mt-3 text-sm text-amber-700">
+                O teste de aniversario usa o fluxo BIRTHDAY e deve ser usado apenas para validar aniversariantes.
+              </p>
             </div>
           ) : null}
 
@@ -1281,6 +1370,7 @@ export function CampaignsManager({
         audienceLoading={campaignAudiencePreviewLoading}
         campaignName={preflightCampaignName}
         templateName={preflightTemplateName}
+        campaignMode={preflightCampaignMode}
         modeLabel={deliveryMode}
         confirmed={previewConfirmed}
         onClose={handleClosePreflight}
@@ -1313,7 +1403,10 @@ function getAudienceSummary(campaign: CampaignItem) {
   }
 
   if (campaign.audienceConfig) {
+    const selectedCount = campaign.audienceConfig.selectedContactIds?.length ?? 0;
+
     return [
+      ...(selectedCount > 0 ? [`${selectedCount} selecionados`] : []),
       ...campaign.audienceConfig.tags,
       ...campaign.audienceConfig.groups,
       ...campaign.audienceConfig.priorities,
@@ -1463,6 +1556,9 @@ function CampaignDetail({
             <StatusBadge status={campaign.status} />
           </div>
           <p className="mt-1 text-sm text-slate-500">{campaign.template.name}</p>
+          <p className="mt-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+            {campaign.campaignMode} • {campaign.template.metaTemplateName}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           {DETAIL_TABS.map((tab) => (
@@ -1486,9 +1582,10 @@ function CampaignDetail({
       {activeTab === "Resumo" ? (
         <div className="mt-5 grid gap-4 md:grid-cols-4">
           <SummaryMetric label="Status" value={getStatusLabel(campaign.status)} />
+          <SummaryMetric label="Tipo" value={campaign.campaignMode} />
           <SummaryMetric label="Público" value={`${campaign.stats.total || audienceSummary.length} contatos`} />
-          <SummaryMetric label="Criada em" value={formatDateTime(campaign.createdAt)} />
-          <SummaryMetric label="Entrega" value={`${deliveryRate}%`} />
+          <SummaryMetric label="Template" value={campaign.template.name} />
+          <SummaryMetric label="Elegíveis" value={String(campaign.stats.total || campaign.audienceConfig?.selectedContactIds?.length || 0)} />
         </div>
       ) : null}
 
