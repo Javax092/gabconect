@@ -6,6 +6,7 @@ import { getMandateContext, requireAuth } from "@/lib/auth";
 import { cancelQueuedCampaignDeliveries } from "@/lib/campaign-queue-cancellation";
 import { recordConsent, suppressContact } from "@/lib/consent";
 import { isValidPhone, normalizePhone, normalizeTagsInput, resolveContactStatus } from "@/lib/contacts";
+import { CONSENT_OPTED_IN, CONSENT_OPTED_OUT, CONSENT_PENDING, MANUAL_CRM_SOURCE } from "@/lib/first-contact";
 import { invalidateContactOperationalCache } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
 import { getClientIp } from "@/lib/security";
@@ -159,10 +160,12 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       data: {
         name: parsed.name,
         phone,
-        source: parsed.source || "manual",
+        source: parsed.source || MANUAL_CRM_SOURCE,
         tags: normalizeTagsInput(parsed.tags ?? ""),
         optIn: parsed.optIn,
         optInAt: parsed.optIn ? existing.optInAt ?? new Date() : null,
+        consentStatus: parsed.optIn ? CONSENT_OPTED_IN : resolvedStatus === "UNSUBSCRIBED" ? CONSENT_OPTED_OUT : CONSENT_PENDING,
+        blockedFromCampaigns: resolvedStatus === "UNSUBSCRIBED" || resolvedStatus === "BLOCKED",
         birthday: parsed.birthday ? new Date(parsed.birthday) : null,
         status: resolvedStatus
       }
@@ -178,7 +181,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       userId: user.id
     });
 
-    if (!parsed.optIn || resolvedStatus !== "ACTIVE") {
+    if (["UNSUBSCRIBED", "BLOCKED", "INVALID"].includes(resolvedStatus)) {
       await suppressContact({
         mandateId,
         contactId: updated.id,

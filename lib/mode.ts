@@ -26,7 +26,7 @@ export function resolveAudienceFilterByMode(input: {
     selectedContactIds: []
   };
 
-  if (input.mode === "TEST") {
+  if (input.mode === "TEST" || input.mode === "FIRST_CONTACT") {
     return {
       birthdayMonthDay: null,
       ...emptyFilters,

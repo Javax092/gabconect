@@ -25,6 +25,7 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const campaignId = url.searchParams.get("campaignId") ?? undefined;
     const templateId = url.searchParams.get("templateId") ?? undefined;
+    const requestedCampaignMode = url.searchParams.get("campaignMode") ?? undefined;
     const audienceFilter = readAudienceFilter(url.searchParams.get("audienceFilter")) as {
       birthdayMonthDay?: string | null;
       tags?: string[];
@@ -112,7 +113,8 @@ export async function GET(request: Request) {
       page: filters.page,
       limit: filters.limit,
       sortBy: filters.sortBy,
-      sortOrder: filters.sortOrder
+      sortOrder: filters.sortOrder,
+      campaignMode: campaign?.campaignMode ?? requestedCampaignMode ?? null
     });
 
     console.info("[campaign:audience-preview]", {

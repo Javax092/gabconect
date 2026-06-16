@@ -14,6 +14,7 @@ import { prisma } from "@/lib/prisma";
 import { getWhatsAppAccessToken } from "@/lib/whatsapp";
 import { assertRedisRateLimit } from "@/lib/redis-rate-limit";
 import { recordSendAttempt } from "@/lib/send-attempts";
+import { evaluateFirstContactEligibility } from "@/lib/first-contact";
 
 type SendGateContext = {
   mandateId: string;
@@ -168,8 +169,33 @@ async function validateCampaignSendInTransaction(input: SendGateContext, phone: 
     ]);
     const contactId = contact?.id ?? input.contactId ?? null;
 
-    // These are the original campaign audience eligibility checks. They remain
-    // in place and are restored by setting SKIP_AUDIENCE_VALIDATION=false.
+    const campaign = input.campaignId
+      ? await tx.campaign.findFirst({
+          where: {
+            id: input.campaignId,
+            mandateId: input.mandateId
+          },
+          include: {
+            template: true,
+            audienceConfig: true
+          }
+        })
+      : null;
+    const firstContact = contact && campaign
+      ? evaluateFirstContactEligibility({
+          campaignMode: campaign.campaignMode,
+          selectedContactIds: campaign.audienceConfig?.selectedContactIds ?? [],
+          contactId: contact.id,
+          source: contact.source,
+          phone: contact.phone,
+          optIn: contact.optIn,
+          status: contact.status,
+          consentStatus: contact.consentStatus,
+          blockedFromCampaigns: contact.blockedFromCampaigns,
+          firstContactSentAt: contact.firstContactSentAt
+        })
+      : { allowed: false, reason: "Contato ou campanha ausente." };
+
     if (!skipAudienceValidation && suppression?.active) {
       return {
         allowed: false,
@@ -188,12 +214,17 @@ async function validateCampaignSendInTransaction(input: SendGateContext, phone: 
       };
     }
 
-    if (!skipAudienceValidation && contact && (contact.status === ContactStatus.UNSUBSCRIBED || contact.optIn === false)) {
+    if (
+      !skipAudienceValidation &&
+      contact &&
+      !firstContact.allowed &&
+      (contact.status === ContactStatus.UNSUBSCRIBED || contact.optIn === false)
+    ) {
       return {
         allowed: false,
         contactId: contact.id,
         status: SendAttemptStatus.OPT_OUT,
-        reason: "Contato sem opt-in ativo."
+        reason: firstContact.reason || "Contato sem opt-in ativo."
       };
     }
 
@@ -205,18 +236,6 @@ async function validateCampaignSendInTransaction(input: SendGateContext, phone: 
         reason: "Contato não está ativo."
       };
     }
-
-    const campaign = input.campaignId
-      ? await tx.campaign.findFirst({
-          where: {
-            id: input.campaignId,
-            mandateId: input.mandateId
-          },
-          include: {
-            template: true
-          }
-        })
-      : null;
 
     if (!campaign || campaign.status !== CampaignStatus.RUNNING) {
       return {
@@ -373,23 +392,32 @@ export async function runSendGate(input: SendGateContext): Promise<SendGateResul
     return block(input, phone, contactId, SendAttemptStatus.OPT_OUT, "Contato consta na SuppressionList.");
   }
 
-  if (!skipCampaignAudienceValidation && (contact?.status === ContactStatus.UNSUBSCRIBED || contact?.optIn === false)) {
+  if (input.kind !== "CAMPAIGN" && (contact?.status === ContactStatus.UNSUBSCRIBED || contact?.optIn === false)) {
     return block(input, phone, contactId, SendAttemptStatus.OPT_OUT, "Contato sem opt-in ativo.");
   }
 
-  if (!skipCampaignAudienceValidation && contact && contact.status !== ContactStatus.ACTIVE) {
+  if (input.kind !== "CAMPAIGN" && contact && contact.status !== ContactStatus.ACTIVE) {
     return block(input, phone, contactId, SendAttemptStatus.BLOCKED, "Contato não está ativo.");
   }
 
   if (input.kind === "CAMPAIGN") {
     if (!isMassCampaignEnabled()) {
-      return block(
-        input,
-        phone,
-        contactId,
-        SendAttemptStatus.BLOCKED,
-        "Campanhas em massa desabilitadas por WHATSAPP_MASS_CAMPAIGN_ENABLED."
-      );
+      const campaignMode = input.campaignId
+        ? await prisma.campaign.findFirst({
+            where: { id: input.campaignId, mandateId: input.mandateId },
+            select: { campaignMode: true },
+          })
+        : null;
+
+      if (campaignMode?.campaignMode !== "TEST" && campaignMode?.campaignMode !== "FIRST_CONTACT") {
+        return block(
+          input,
+          phone,
+          contactId,
+          SendAttemptStatus.BLOCKED,
+          "Campanhas em massa desabilitadas por WHATSAPP_MASS_CAMPAIGN_ENABLED."
+        );
+      }
     }
 
     const campaignGate = await validateCampaignSendInTransaction(input, phone, now, skipCampaignAudienceValidation);

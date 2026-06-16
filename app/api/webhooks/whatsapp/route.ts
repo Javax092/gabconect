@@ -4,6 +4,7 @@ import { MessageDirection, WhatsAppMessageLogStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 import { ApiRouteError, apiError } from "@/lib/api";
+import { CONSENT_OPTED_IN } from "@/lib/first-contact";
 import { invalidateContactOperationalCache } from "@/lib/operational-cache";
 import { prisma } from "@/lib/prisma";
 import { enqueueJob, QUEUE_NAMES } from "@/lib/queue";
@@ -195,6 +196,44 @@ export async function POST(request: Request) {
       invalidateContactOperationalCache(mandate.id);
       logWhatsAppEvent("info", "contact_opt_out", {
         contactId: optOut.contact.id,
+        mandateId: mandate.id,
+      });
+      console.info("[contact:consent:opted-out]", {
+        contactId: optOut.contact.id,
+        mandateId: mandate.id,
+      });
+    } else {
+      const phone = normalizePhone(message.fromPhone);
+      const now = new Date();
+      const contact = await prisma.contact.upsert({
+        where: {
+          mandateId_phone: {
+            mandateId: mandate.id,
+            phone,
+          },
+        },
+        update: {
+          name: message.profileName?.trim() || undefined,
+          optIn: true,
+          optInAt: now,
+          lastInboundAt: now,
+          consentStatus: CONSENT_OPTED_IN,
+        },
+        create: {
+          mandateId: mandate.id,
+          name: message.profileName?.trim() || phone,
+          phone,
+          source: "WHATSAPP_WEBHOOK",
+          optIn: true,
+          optInAt: now,
+          lastInboundAt: now,
+          consentStatus: CONSENT_OPTED_IN,
+          tags: [],
+        },
+      });
+      invalidateContactOperationalCache(mandate.id);
+      console.info("[contact:consent:opted-in]", {
+        contactId: contact.id,
         mandateId: mandate.id,
       });
     }

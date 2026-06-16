@@ -214,6 +214,7 @@ export async function POST(request: Request) {
       selectedContactIds.length > 0 &&
       (requestedMode === undefined ||
         requestedMode === "TEST" ||
+        requestedMode === "FIRST_CONTACT" ||
         action === "manual-test" ||
         source === "campaign-wizard");
 
@@ -229,7 +230,7 @@ export async function POST(request: Request) {
 
     const parsed = validateSchema(campaignSchema, {
       ...rawBody,
-      campaignMode: manualTestIntent ? "TEST" : rawBody.campaignMode,
+      campaignMode: manualTestIntent ? (requestedMode === "FIRST_CONTACT" ? "FIRST_CONTACT" : "TEST") : rawBody.campaignMode,
       birthdayMonthDay,
       selectedContactIds,
       segmentTags:

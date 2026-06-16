@@ -52,7 +52,7 @@ type CampaignItem = {
   id: string;
   name: string;
   templateId: string;
-  campaignMode: "TEST" | "BIRTHDAY" | "AUDIENCE";
+  campaignMode: "TEST" | "FIRST_CONTACT" | "BIRTHDAY" | "AUDIENCE";
   segmentTags: string[];
   audienceConfig: AudienceConfig | null;
   audience?: string[];
@@ -408,6 +408,7 @@ export function CampaignsManager({
     const controller = new AbortController();
     const params = new URLSearchParams();
     params.set("templateId", template.id);
+    params.set("campaignMode", "TEST");
     params.set("page", String(draftAudiencePreviewPage));
     params.set("limit", "10");
     params.set("sortBy", selectionFilters.sortBy);
@@ -470,6 +471,7 @@ export function CampaignsManager({
     const controller = new AbortController();
     const params = new URLSearchParams();
     params.set("templateId", template.id);
+    params.set("campaignMode", "TEST");
     params.set("page", "1");
     params.set("limit", "100");
     params.set("sortBy", "name");
@@ -588,6 +590,10 @@ export function CampaignsManager({
   function toggleRecipientSelection(contactId: string) {
     setAudience((current) => {
       const currentIds = current.selectedContactIds ?? [];
+      if (!currentIds.includes(contactId) && currentIds.length >= 5) {
+        setError("Selecione no maximo 5 contatos para primeiro contato controlado.");
+        return current;
+      }
       const nextIds = currentIds.includes(contactId)
         ? currentIds.filter((item) => item !== contactId)
         : [...currentIds, contactId];
@@ -609,6 +615,9 @@ export function CampaignsManager({
     setAudience((current) => {
       const currentIds = new Set(current.selectedContactIds ?? []);
       for (const recipient of draftRecipients) {
+        if (currentIds.size >= 5) {
+          break;
+        }
         currentIds.add(recipient.contactId);
       }
 
@@ -1225,7 +1234,7 @@ export function CampaignsManager({
                   >
                     <option value="ALL">Opt-in: todos</option>
                     <option value="OPT_IN">Opt-in</option>
-                    <option value="SEM_OPT_IN">Sem opt-in</option>
+                    <option value="SEM_OPT_IN">Primeiro contato pendente</option>
                     <option value="OPT_OUT">Opt-out</option>
                   </select>
                   <select
@@ -1294,6 +1303,11 @@ export function CampaignsManager({
                   <ReviewLine label="Elegíveis" value={String(selectedAudiencePreview?.totalElegiveis ?? 0)} />
                   <ReviewLine label="Data" value={form.scheduledAt ? formatDateTime(form.scheduledAt) : "Envio manual"} />
                 </div>
+                {selectedAudiencePreview?.recipients.some((recipient) => recipient.optInStatus === "FIRST_CONTACT_ALLOWED") ? (
+                  <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    Este contato ainda não possui opt-in confirmado. Será permitido apenas primeiro contato controlado.
+                  </p>
+                ) : null}
               </div>
               <SelectedAudienceList
                 loading={selectedAudiencePreviewLoading}
@@ -1320,7 +1334,12 @@ export function CampaignsManager({
                 <Button
                   type="submit"
                   className="gap-2"
-                  disabled={pending || templateOptions.length === 0 || (audience.selectedContactIds?.length ?? 0) === 0}
+                  disabled={
+                    pending ||
+                    templateOptions.length === 0 ||
+                    (audience.selectedContactIds?.length ?? 0) === 0 ||
+                    (audience.selectedContactIds?.length ?? 0) > 5
+                  }
                 >
                   <Send className="h-4 w-4" />
                   Criar campanha
@@ -1479,7 +1498,11 @@ function SelectionStateBadge({ state }: { state: string }) {
       className: "border-rose-200 bg-rose-50 text-rose-700"
     },
     SEM_OPT_IN: {
-      label: "Sem opt-in",
+      label: "Primeiro contato pendente",
+      className: "border-amber-200 bg-amber-50 text-amber-700"
+    },
+    PRIMEIRO_CONTATO_PENDENTE: {
+      label: "Primeiro contato pendente",
       className: "border-amber-200 bg-amber-50 text-amber-700"
     },
     SEM_TELEFONE: {
@@ -1703,6 +1726,11 @@ function AudiencePreviewTable({
               <td className="px-3 py-3 text-slate-600">{recipient.phone || "-"}</td>
               <td className="px-3 py-3">
                 <SelectionStateBadge state={recipient.selectionState} />
+                {recipient.optInStatus === "FIRST_CONTACT_ALLOWED" ? (
+                  <p className="mt-1 text-xs text-amber-700">
+                    Primeiro contato pendente
+                  </p>
+                ) : null}
               </td>
             </tr>
           ))}
@@ -1769,6 +1797,9 @@ function SelectedAudienceList({
             </div>
             <div className="flex items-center gap-2">
               <SelectionStateBadge state={recipient.selectionState} />
+              {recipient.optInStatus === "FIRST_CONTACT_ALLOWED" ? (
+                <span className="text-xs text-amber-700">Primeiro contato pendente</span>
+              ) : null}
               <Button type="button" variant="ghost" onClick={() => onRemove(recipient.contactId)}>
                 Remover
               </Button>

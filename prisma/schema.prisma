@@ -273,6 +273,12 @@ model Contact {
   source               String
   optIn                Boolean              @default(false)
   optInAt              DateTime?
+  optOutAt             DateTime?
+  consentStatus        String               @default("PENDING")
+  firstContactSentAt   DateTime?
+  firstContactStatus   String?
+  lastInboundAt        DateTime?
+  blockedFromCampaigns Boolean              @default(false)
   tags                 String[]
   influenceScore       Int                  @default(0)
   influenceLevel       String?
@@ -304,6 +310,7 @@ model Contact {
 
   @@unique([mandateId, phone])
   @@index([mandateId, status, optIn])
+  @@index([mandateId, consentStatus])
   @@index([mandateId, birthday])
   @@index([mandateId, createdAt])
   @@index([mandateId, influenceScore])
@@ -806,6 +813,7 @@ enum CampaignRecipientStatus {
 
 enum CampaignMode {
   TEST
+  FIRST_CONTACT
   BIRTHDAY
   AUDIENCE
 }

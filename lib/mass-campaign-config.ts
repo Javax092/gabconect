@@ -24,7 +24,7 @@ export function getSendLimitConfig() {
 }
 
 export function getCampaignModeDailyCap(mode: CampaignMode) {
-  if (mode === CampaignMode.TEST) {
+  if (mode === CampaignMode.TEST || mode === CampaignMode.FIRST_CONTACT) {
     return 50;
   }
 

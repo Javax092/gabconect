@@ -11,7 +11,7 @@ const campaignStatuses = [
   "FAILED",
   "CANCELLED",
 ] as const;
-const campaignModes = ["TEST", "BIRTHDAY", "AUDIENCE"] as const;
+const campaignModes = ["TEST", "FIRST_CONTACT", "BIRTHDAY", "AUDIENCE"] as const;
 
 export type CampaignMode = (typeof campaignModes)[number];
 
@@ -90,7 +90,7 @@ export const campaignSchema = z
     (data) => {
       // TEST campaigns MUST have selected contacts
       if (
-        data.campaignMode === "TEST" &&
+        (data.campaignMode === "TEST" || data.campaignMode === "FIRST_CONTACT") &&
         data.selectedContactIds.length === 0
       ) {
         return false;
@@ -98,7 +98,7 @@ export const campaignSchema = z
       return true;
     },
     {
-      message: "Campanhas TEST requerem pelo menos 1 contato selecionado.",
+      message: "Campanhas TEST/FIRST_CONTACT requerem pelo menos 1 contato selecionado.",
       path: ["selectedContactIds"],
     },
   )

@@ -339,7 +339,8 @@ function formatSelectionState(value: string) {
   const labels: Record<string, string> = {
     ELEGIVEL: "Elegível",
     BLOQUEADO: "Bloqueado",
-    SEM_OPT_IN: "Sem opt-in",
+    SEM_OPT_IN: "Primeiro contato pendente",
+    PRIMEIRO_CONTATO_PENDENTE: "Primeiro contato pendente",
     SEM_TELEFONE: "Sem telefone",
     OPT_OUT: "Opt-out",
     JA_ENFILEIRADO: "Já enfileirado"

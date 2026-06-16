@@ -3,7 +3,8 @@ import { CampaignRecipientStatus, CampaignStatus, ConsentAction, ContactStatus, 
 import { cancelQueuedCampaignDeliveries } from "@/lib/campaign-queue-cancellation";
 import { prisma } from "@/lib/prisma";
 
-const OPT_OUT_KEYWORDS = ["UNSUBSCRIBE", "STOP", "SAIR", "CANCELAR", "PARAR"] as const;
+const OPT_OUT_KEYWORDS = ["UNSUBSCRIBE", "STOP", "SAIR", "CANCELAR", "PARAR", "REMOVER"] as const;
+const OPT_OUT_PHRASES = ["NAO QUERO", "NÃO QUERO"] as const;
 const ACTIVE_CAMPAIGN_STATUSES: CampaignStatus[] = [
   CampaignStatus.DRAFT,
   CampaignStatus.SCHEDULED,
@@ -27,6 +28,7 @@ export function extractOptOutKeyword(text: string) {
   const normalized = normalizeKeywordText(text);
 
   return (
+    OPT_OUT_PHRASES.find((keyword) => normalized.includes(normalizeKeywordText(keyword))) ??
     OPT_OUT_KEYWORDS.find((keyword) =>
       normalized.split(/\s+/).some((token) => token === keyword)
     ) ?? null
@@ -120,7 +122,10 @@ export async function registerOptOut(input: {
       name: input.name?.trim() || undefined,
       status: ContactStatus.UNSUBSCRIBED,
       optIn: false,
-      optInAt: null
+      optInAt: null,
+      optOutAt: new Date(),
+      consentStatus: "OPTED_OUT",
+      blockedFromCampaigns: true
     },
     create: {
       mandateId: input.mandateId,
@@ -129,6 +134,9 @@ export async function registerOptOut(input: {
       source,
       optIn: false,
       optInAt: null,
+      optOutAt: new Date(),
+      consentStatus: "OPTED_OUT",
+      blockedFromCampaigns: true,
       status: ContactStatus.UNSUBSCRIBED,
       tags: []
     }
@@ -201,6 +209,12 @@ export async function registerOptOut(input: {
     mandateId: input.mandateId,
     contactId: contact.id,
     reason: `Contato em opt-out por ${keyword}.`
+  });
+
+  console.info("[contact:consent:opted-out]", {
+    mandateId: input.mandateId,
+    contactId: contact.id,
+    keyword
   });
 
   return {

@@ -12,6 +12,10 @@ import {
 
 import { prisma } from "@/lib/prisma";
 import { isApprovedTemplate } from "@/lib/whatsapp/templates";
+import {
+  evaluateFirstContactEligibility,
+  FIRST_CONTACT_ALLOWED,
+} from "@/lib/first-contact";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_WINDOW_DAYS = 7;
@@ -567,8 +571,9 @@ export async function runCampaignSafetySimulation(input: {
   };
   const audienceTerms = getAudienceTerms(audienceConfig);
   const selectedContactIds = audienceConfig.selectedContactIds ?? [];
+  const isFirstContactLikeMode = campaign.campaignMode === "TEST" || campaign.campaignMode === "FIRST_CONTACT";
   const isSmallManualTest =
-    campaign.campaignMode === "TEST" &&
+    isFirstContactLikeMode &&
     selectedContactIds.length > 0 &&
     selectedContactIds.length <= 5;
   const since24h = getWindowStart(1);
@@ -643,6 +648,26 @@ export async function runCampaignSafetySimulation(input: {
       })
     ]);
 
+  const selectedContacts =
+    selectedContactIds.length > 0
+      ? await prisma.contact.findMany({
+          where: {
+            mandateId: input.mandateId,
+            id: { in: selectedContactIds },
+          },
+          select: {
+            id: true,
+            source: true,
+            phone: true,
+            optIn: true,
+            status: true,
+            consentStatus: true,
+            blockedFromCampaigns: true,
+            firstContactSentAt: true,
+          },
+        })
+      : [];
+
   const profile = engine.profile;
   const optInRatio = totalContacts > 0 ? optedInContacts / totalContacts : 0;
   const failureRate24h = percent(recentFailed, recentProcessed);
@@ -680,8 +705,29 @@ export async function runCampaignSafetySimulation(input: {
   safetyScore -= sensitivity === "high" ? 10 : sensitivity === "medium" ? 4 : 0;
   safetyScore -= profile.warmingStage === CampaignWarmupStage.DAY_1 ? 8 : profile.warmingStage === CampaignWarmupStage.DAY_2 ? 4 : 0;
 
+  const selectedFirstContactDecisions = selectedContacts.map((contact) => ({
+    contactId: contact.id,
+    decision: evaluateFirstContactEligibility({
+      campaignMode: campaign.campaignMode,
+      selectedContactIds,
+      contactId: contact.id,
+      source: contact.source,
+      phone: contact.phone,
+      optIn: contact.optIn,
+      status: contact.status,
+      consentStatus: contact.consentStatus,
+      blockedFromCampaigns: contact.blockedFromCampaigns,
+      firstContactSentAt: contact.firstContactSentAt,
+    }),
+  }));
   const selectedTestHasInvalidConsent =
-    isSmallManualTest && (totalContacts === 0 || optedInContacts !== totalContacts);
+    isSmallManualTest &&
+    (selectedContacts.length !== selectedContactIds.length ||
+      selectedContacts.some((contact) => {
+        if (contact.optIn) return false;
+        return !selectedFirstContactDecisions.find((item) => item.contactId === contact.id)?.decision.allowed;
+      }));
+  const selectedTestHasFirstContactAllowed = selectedFirstContactDecisions.some((item) => item.decision.allowed);
   const selectedTestHasTemplateBlock = isSmallManualTest && !templateOperationallyApproved;
   const selectedTestHasCriticalOperationalBlock =
     profile.reputationScore < 60 ||
@@ -694,7 +740,7 @@ export async function runCampaignSafetySimulation(input: {
   }
 
   if (
-    campaign.campaignMode === "TEST" &&
+    isFirstContactLikeMode &&
     (selectedContactIds.length === 0 ||
       selectedContactIds.length > 5 ||
       selectedTestHasInvalidConsent ||
@@ -747,7 +793,7 @@ export async function runCampaignSafetySimulation(input: {
     riskLevel !== CampaignRiskLevel.CRITICAL &&
     !recommendedStartTime &&
     profile.reputationScore >= 60 &&
-    optedInContacts > 0;
+    (optedInContacts > 0 || selectedTestHasFirstContactAllowed);
 
   if (optInRatio < 0.75) {
     warnings.push("Parte relevante da audiencia nao possui opt-in ativo e ficara fora do envio.");
@@ -777,25 +823,44 @@ export async function runCampaignSafetySimulation(input: {
     warnings.push("O tamanho da audiencia excede o throughput seguro atual e exige fracionamento.");
   }
 
-  if (campaign.campaignMode === "TEST") {
+  if (isFirstContactLikeMode) {
     if (selectedContactIds.length === 0) {
-      blockingReasons.push("Campanha TEST sem contatos selecionados.");
+      blockingReasons.push("Campanha TEST/FIRST_CONTACT sem contatos selecionados.");
       recommendations.push("Selecionar ate 5 contatos elegiveis para teste controlado.");
     } else if (selectedContactIds.length > 5) {
-      blockingReasons.push("Campanha TEST excede o limite seguro de 5 contatos selecionados.");
+      blockingReasons.push("Campanha TEST/FIRST_CONTACT excede o limite seguro de 5 contatos selecionados.");
       recommendations.push("Reduzir a selecao de teste ou usar modo de audiencia com preflight completo.");
     } else {
-      recommendations.push("TEST manual pequeno tratado como envio controlado, sem regra de volume massivo.");
+      recommendations.push("TEST/FIRST_CONTACT manual pequeno tratado como envio controlado, sem regra de volume massivo.");
     }
 
     if (selectedTestHasInvalidConsent) {
-      blockingReasons.push("TEST possui contato selecionado sem opt-in ativo, bloqueado, invalido ou inexistente.");
-      recommendations.push("Remover contatos inelegiveis antes de iniciar o teste.");
+      const firstBlocked = selectedFirstContactDecisions.find((item) => !item.decision.allowed)?.decision.reason;
+      blockingReasons.push(
+        firstBlocked
+          ? `TEST possui contato inelegivel para primeiro contato: ${firstBlocked}`
+          : "TEST/FIRST_CONTACT possui contato selecionado sem opt-in ativo, bloqueado, invalido ou inexistente."
+      );
+      recommendations.push("Remover contatos inelegiveis ou limitar o primeiro contato a contatos manuais elegiveis.");
+      console.warn("[first-contact:blocked]", {
+        campaignId: campaign.id,
+        selectedContactCount: selectedContactIds.length,
+        reason: firstBlocked ?? "INVALID_SELECTED_CONTACT",
+      });
+    }
+
+    if (selectedTestHasFirstContactAllowed && !selectedTestHasInvalidConsent) {
+      recommendations.push("FIRST_CONTACT_ALLOWED: primeiro contato controlado permitido para contato manual sem opt-in confirmado.");
+      console.info("[first-contact:allowed]", {
+        campaignId: campaign.id,
+        selectedContactCount: selectedContactIds.length,
+        reason: FIRST_CONTACT_ALLOWED,
+      });
     }
 
     if (selectedTestHasTemplateBlock) {
-      blockingReasons.push("Template do TEST nao esta aprovado localmente nem listado em WHATSAPP_APPROVED_TEMPLATES.");
-      recommendations.push("Usar template aprovado antes de iniciar campanha TEST.");
+      blockingReasons.push("Template do TEST/FIRST_CONTACT nao esta aprovado localmente nem listado em WHATSAPP_APPROVED_TEMPLATES.");
+      recommendations.push("Usar template aprovado antes de iniciar campanha TEST/FIRST_CONTACT.");
     }
   }
 

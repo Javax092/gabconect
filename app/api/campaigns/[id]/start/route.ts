@@ -35,11 +35,12 @@ function isCampaignTestBusinessHoursBypassEnabled(input: {
   campaignMode: CampaignMode;
   campaignId: string;
 }) {
+  const testLikeCampaign = input.campaignMode === "TEST" || input.campaignMode === "FIRST_CONTACT";
   const checks = {
     nonProduction: process.env.NODE_ENV !== "production",
     envEnabled: process.env.CAMPAIGN_TEST_BYPASS_BUSINESS_HOURS === "true",
     adminUser: input.role === Role.ADMIN,
-    testCampaign: input.campaignMode === "TEST",
+    testCampaign: testLikeCampaign,
   };
 
   const allowed =
@@ -165,7 +166,7 @@ export async function POST(request: Request, context: RouteContext) {
     const isManualSelection = selectedContactIds.length > 0;
 
     const effectiveSelectedContactIds =
-      campaign.campaignMode === "TEST" && !isManualSelection
+      (campaign.campaignMode === "TEST" || campaign.campaignMode === "FIRST_CONTACT") && !isManualSelection
         ? []
         : selectedContactIds;
 
@@ -177,6 +178,7 @@ export async function POST(request: Request, context: RouteContext) {
       selectedContactIds: effectiveSelectedContactIds,
       selectedOnly: isManualSelection,
       showOnlyEligible: false,
+      campaignMode: campaign.campaignMode,
     });
 
     console.info("[campaign:start:resolved]", {
@@ -191,18 +193,18 @@ export async function POST(request: Request, context: RouteContext) {
       audienceEligible: audiencePreview.totalElegiveis,
     });
 
-    if (campaign.campaignMode === "TEST" && selectedContactIds.length === 0) {
+    if ((campaign.campaignMode === "TEST" || campaign.campaignMode === "FIRST_CONTACT") && selectedContactIds.length === 0) {
       throw new ApiRouteError(
         400,
-        "Selecione pelo menos um contato para o modo TEST.",
+        "Selecione pelo menos um contato para o modo TEST/FIRST_CONTACT.",
         "TEST_NO_SELECTED_CONTACTS",
       );
     }
 
-    if (campaign.campaignMode === "TEST" && selectedContactIds.length > 5) {
+    if ((campaign.campaignMode === "TEST" || campaign.campaignMode === "FIRST_CONTACT") && selectedContactIds.length > 5) {
       throw new ApiRouteError(
         409,
-        "Campanha TEST limitada a 5 contatos selecionados.",
+        "Campanha TEST/FIRST_CONTACT limitada a 5 contatos selecionados.",
         "TEST_TOO_MANY_SELECTED_CONTACTS",
         {
           selectedContactIds: selectedContactIds.length,
@@ -246,7 +248,7 @@ export async function POST(request: Request, context: RouteContext) {
       modeDailyCap: getCampaignModeDailyCap(campaign.campaignMode),
     };
 
-    if (!isMassCampaignEnabled() && campaign.campaignMode !== "TEST") {
+    if (!isMassCampaignEnabled() && campaign.campaignMode !== "TEST" && campaign.campaignMode !== "FIRST_CONTACT") {
       throw new ApiRouteError(
         409,
         "Campanhas em massa desabilitadas.",

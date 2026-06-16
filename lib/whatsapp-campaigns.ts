@@ -117,6 +117,7 @@ export async function createCampaignRecipients(
       contactTypes?: string[];
       selectedContactIds?: string[];
     };
+    campaignMode?: string | null;
   },
 ) {
   const audience = await prisma.campaignAudienceConfig.findUnique({
@@ -141,6 +142,7 @@ export async function createCampaignRecipients(
     templateBody: options?.templateBody ?? "",
     audienceFilter,
     selectedContactIds: audienceFilter.selectedContactIds ?? [],
+    campaignMode: options?.campaignMode ?? null,
   });
 
   return {

@@ -32,7 +32,7 @@ function getEnvReadinessSummary(campaignMode: string) {
     ...(process.env.WHATSAPP_DRY_RUN?.trim().toLowerCase() === "true"
       ? ["WHATSAPP_DRY_RUN_TRUE"]
       : []),
-    ...(!isMassCampaignEnabled() && campaignMode !== "TEST"
+    ...(!isMassCampaignEnabled() && campaignMode !== "TEST" && campaignMode !== "FIRST_CONTACT"
       ? ["WHATSAPP_MASS_CAMPAIGN_ENABLED"]
       : []),
   ];
@@ -82,6 +82,7 @@ async function buildPreflightPayload(input: {
     selectedContactIds,
     selectedOnly: selectedContactIds.length > 0,
     showOnlyEligible: false,
+    campaignMode: campaign.campaignMode,
   });
 
   const simulation = await runCampaignSafetySimulation({

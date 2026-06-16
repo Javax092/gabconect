@@ -7,6 +7,11 @@ import {
 import { isAudienceValidationBypassed } from "@/lib/audience-validation";
 import { flattenAudience } from "@/lib/campaign-infrastructure";
 import { personalizeCampaignText } from "@/lib/campaign-execution";
+import {
+  evaluateFirstContactEligibility,
+  FIRST_CONTACT_ALLOWED,
+  PENDING_FIRST_CONTACT,
+} from "@/lib/first-contact";
 import { prisma } from "@/lib/prisma";
 
 /* =========================
@@ -35,11 +40,11 @@ export type ResolvedAudienceRecipient = {
   tags: string[];
   birthday: string | null;
   optInStatus:
-    | "OPT_IN"
-    | "SEM_OPT_IN"
-    | "OPT_OUT"
-    | "BLOQUEADO"
-    | "INVALIDO"
+    | "OPTED_IN"
+    | "PENDING_FIRST_CONTACT"
+    | "FIRST_CONTACT_ALLOWED"
+    | "OPTED_OUT"
+    | "BLOCKED"
     | "SEM_TELEFONE";
   inclusionReason: string;
   renderedPreview: string;
@@ -51,6 +56,7 @@ export type ResolvedAudienceRecipient = {
     | "ELEGIVEL"
     | "BLOQUEADO"
     | "SEM_OPT_IN"
+    | "PRIMEIRO_CONTATO_PENDENTE"
     | "SEM_TELEFONE"
     | "OPT_OUT"
     | "JA_ENFILEIRADO";
@@ -156,18 +162,26 @@ function buildAudienceWhere(input: {
 ========================= */
 
 function getOptInStatus(input: {
+  contactId: string;
   phone: string;
   optIn: boolean;
   status: ContactStatus;
-  manualSelection: boolean;
+  source: string;
+  consentStatus: string | null;
+  blockedFromCampaigns: boolean;
+  firstContactSentAt: Date | null;
+  campaignMode?: string | null;
+  selectedContactIds: string[];
 }) {
   if (!input.phone?.trim()) return "SEM_TELEFONE";
   if (!isValidPhone(input.phone) || input.status === ContactStatus.INVALID)
-    return "INVALIDO";
-  if (input.status === ContactStatus.UNSUBSCRIBED) return "OPT_OUT";
-  if (input.status === ContactStatus.BLOCKED) return "BLOQUEADO";
-  if (!input.optIn && !input.manualSelection) return "SEM_OPT_IN";
-  return "OPT_IN";
+    return "BLOCKED";
+  if (input.status === ContactStatus.UNSUBSCRIBED || input.consentStatus === "OPTED_OUT") return "OPTED_OUT";
+  if (input.status === ContactStatus.BLOCKED || input.blockedFromCampaigns) return "BLOCKED";
+  if (input.optIn || input.consentStatus === "OPTED_IN") return "OPTED_IN";
+
+  const firstContact = evaluateFirstContactEligibility(input);
+  return firstContact.allowed ? FIRST_CONTACT_ALLOWED : PENDING_FIRST_CONTACT;
 }
 
 function getSelectionState(input: {
@@ -177,9 +191,9 @@ function getSelectionState(input: {
 }) {
   if (input.alreadyQueued) return "JA_ENFILEIRADO";
   if (input.isEligible) return "ELEGIVEL";
-  if (input.optInStatus === "BLOQUEADO" || input.optInStatus === "INVALIDO")
+  if (input.optInStatus === "BLOCKED")
     return "BLOQUEADO";
-  if (input.optInStatus === "SEM_OPT_IN") return "SEM_OPT_IN";
+  if (input.optInStatus === "PENDING_FIRST_CONTACT") return "PRIMEIRO_CONTATO_PENDENTE";
   if (input.optInStatus === "SEM_TELEFONE") return "SEM_TELEFONE";
   return "OPT_OUT";
 }
@@ -194,11 +208,10 @@ async function collectAudienceResolution(input: {
   audienceFilter: CampaignAudienceFilter;
   campaignId?: string;
   selectedContactIds?: string[];
+  campaignMode?: string | null;
 }) {
   const filter = normalizeAudienceFilter(input.audienceFilter);
   const selected = normalizeSelectionIds(input.selectedContactIds);
-  const manual = selected.length > 0;
-
   const [contacts, existing] = await Promise.all([
     prisma.contact.findMany({
       where: buildAudienceWhere({
@@ -213,6 +226,12 @@ async function collectAudienceResolution(input: {
         tags: true,
         birthday: true,
         optIn: true,
+        optInAt: true,
+        consentStatus: true,
+        firstContactSentAt: true,
+        firstContactStatus: true,
+        blockedFromCampaigns: true,
+        source: true,
         status: true,
         createdAt: true,
       },
@@ -232,10 +251,16 @@ async function collectAudienceResolution(input: {
 
   const resolved: ResolvedAudienceRecipient[] = contacts.map((c) => {
     const optInStatus = getOptInStatus({
+      contactId: c.id,
       phone: c.phone,
       optIn: c.optIn,
       status: c.status,
-      manualSelection: manual,
+      source: c.source,
+      consentStatus: c.consentStatus,
+      blockedFromCampaigns: c.blockedFromCampaigns,
+      firstContactSentAt: c.firstContactSentAt,
+      campaignMode: input.campaignMode,
+      selectedContactIds: selected,
     });
 
     const existingStatus = existingMap.get(c.id);
@@ -247,7 +272,8 @@ async function collectAudienceResolution(input: {
     const isEligible =
       !alreadyQueued &&
       (skipValidation ||
-        (optInStatus === "OPT_IN" && c.status === ContactStatus.ACTIVE));
+        ((optInStatus === "OPTED_IN" || optInStatus === FIRST_CONTACT_ALLOWED) &&
+          c.status === ContactStatus.ACTIVE));
 
     const selectionState = getSelectionState({
       isEligible,
@@ -303,6 +329,7 @@ type ResolveCampaignAudienceInput = {
   query?: string;
   sortBy?: CampaignAudienceSortBy;
   sortOrder?: CampaignAudienceSortOrder;
+  campaignMode?: string | null;
 };
 
 export async function resolveCampaignAudience(
@@ -338,7 +365,17 @@ export async function resolveCampaignAudience(
       return false;
     }
 
-    if (input.optInFilter && input.optInFilter !== "ALL" && recipient.optInStatus !== input.optInFilter) {
+    if (
+      input.optInFilter &&
+      input.optInFilter !== "ALL" &&
+      !(
+        (input.optInFilter === "OPT_IN" && recipient.optInStatus === "OPTED_IN") ||
+        (input.optInFilter === "SEM_OPT_IN" &&
+          (recipient.optInStatus === "PENDING_FIRST_CONTACT" ||
+            recipient.optInStatus === FIRST_CONTACT_ALLOWED)) ||
+        (input.optInFilter === "OPT_OUT" && recipient.optInStatus === "OPTED_OUT")
+      )
+    ) {
       return false;
     }
 
@@ -378,11 +415,13 @@ export async function resolveCampaignAudience(
   const offset = (page - 1) * limit;
   const paginated = filtered.slice(offset, offset + limit);
 
-  const totalInvalidos = filtered.filter((r) => r.optInStatus === "INVALIDO").length;
-  const totalBloqueados = filtered.filter((r) => r.optInStatus === "BLOQUEADO").length;
-  const totalOptOut = filtered.filter((r) => r.optInStatus === "OPT_OUT").length;
+  const totalInvalidos = 0;
+  const totalBloqueados = filtered.filter((r) => r.optInStatus === "BLOCKED").length;
+  const totalOptOut = filtered.filter((r) => r.optInStatus === "OPTED_OUT").length;
   const totalSemTelefone = filtered.filter((r) => r.optInStatus === "SEM_TELEFONE").length;
-  const totalSemOptIn = filtered.filter((r) => r.optInStatus === "SEM_OPT_IN").length;
+  const totalSemOptIn = filtered.filter((r) =>
+    r.optInStatus === "PENDING_FIRST_CONTACT" || r.optInStatus === FIRST_CONTACT_ALLOWED
+  ).length;
 
   return {
     totalElegiveis: filtered.filter((r) => r.isEligible).length,
@@ -419,6 +458,7 @@ export async function materializeCampaignAudience(input: {
   templateBody: string;
   audienceFilter: CampaignAudienceFilter;
   selectedContactIds?: string[];
+  campaignMode?: string | null;
 }) {
   const { resolvedRecipients } = await collectAudienceResolution({
     campaignId: input.campaignId,
@@ -426,6 +466,7 @@ export async function materializeCampaignAudience(input: {
     templateBody: input.templateBody,
     audienceFilter: input.audienceFilter,
     selectedContactIds: input.selectedContactIds,
+    campaignMode: input.campaignMode,
   });
 
   if (resolvedRecipients.length > 0) {
@@ -445,10 +486,12 @@ export async function materializeCampaignAudience(input: {
   return {
     createdRecipients: resolvedRecipients.filter((r) => r.isEligible).length,
     totalElegiveis: resolvedRecipients.filter((r) => r.isEligible).length,
-    totalInvalidos: resolvedRecipients.filter((r) => r.optInStatus === "INVALIDO").length,
-    totalBloqueados: resolvedRecipients.filter((r) => r.optInStatus === "BLOQUEADO").length,
-    totalOptOut: resolvedRecipients.filter((r) => r.optInStatus === "OPT_OUT").length,
+    totalInvalidos: 0,
+    totalBloqueados: resolvedRecipients.filter((r) => r.optInStatus === "BLOCKED").length,
+    totalOptOut: resolvedRecipients.filter((r) => r.optInStatus === "OPTED_OUT").length,
     totalSemTelefone: resolvedRecipients.filter((r) => r.optInStatus === "SEM_TELEFONE").length,
-    totalSemOptIn: resolvedRecipients.filter((r) => r.optInStatus === "SEM_OPT_IN").length,
+    totalSemOptIn: resolvedRecipients.filter((r) =>
+      r.optInStatus === "PENDING_FIRST_CONTACT" || r.optInStatus === FIRST_CONTACT_ALLOWED
+    ).length,
   };
 }

@@ -34,6 +34,13 @@ import {
   getMassCampaignTestLimit,
   getRandomSendDelaySeconds,
 } from "@/lib/mass-campaign-config";
+import {
+  evaluateFirstContactEligibility,
+  FIRST_CONTACT_ALLOWED,
+  FIRST_CONTACT_SENT,
+  CONSENT_PENDING,
+  MANUAL_CRM_SOURCE,
+} from "@/lib/first-contact";
 
 /* =========================
    CONFIG
@@ -240,6 +247,7 @@ export async function queueCampaignRecipients(input: {
         contactTypes: campaign.audienceConfig?.contactTypes ?? [],
         selectedContactIds: campaign.audienceConfig?.selectedContactIds ?? [],
       },
+      campaignMode: campaign.campaignMode,
     },
   );
 
@@ -290,13 +298,31 @@ export async function queueCampaignRecipients(input: {
   let accumulatedDelaySeconds = 0;
 
   const skipValidation = isAudienceValidationBypassed();
+  const selectedContactIds = campaign.audienceConfig?.selectedContactIds ?? [];
 
   for (const recipient of recipients) {
+    const firstContact = evaluateFirstContactEligibility({
+      campaignMode: campaign.campaignMode,
+      selectedContactIds,
+      contactId: recipient.contact.id,
+      source: recipient.contact.source,
+      phone: recipient.contact.phone,
+      optIn: recipient.contact.optIn,
+      status: recipient.contact.status,
+      consentStatus: recipient.contact.consentStatus,
+      blockedFromCampaigns: recipient.contact.blockedFromCampaigns,
+      firstContactSentAt: recipient.contact.firstContactSentAt,
+    });
     if (
       !skipValidation &&
-      (!recipient.contact.optIn ||
-        recipient.contact.status !== ContactStatus.ACTIVE)
+      !firstContact.allowed &&
+      (!recipient.contact.optIn || recipient.contact.status !== ContactStatus.ACTIVE)
     ) {
+      console.warn("[first-contact:blocked]", {
+        campaignId: campaign.id,
+        contactId: recipient.contact.id,
+        reason: firstContact.reason,
+      });
       await prisma.campaignRecipient.update({
         where: { id: recipient.id },
         data: {
@@ -307,6 +333,14 @@ export async function queueCampaignRecipients(input: {
         },
       });
       continue;
+    }
+
+    if (firstContact.allowed) {
+      console.info("[first-contact:allowed]", {
+        campaignId: campaign.id,
+        contactId: recipient.contact.id,
+        reason: FIRST_CONTACT_ALLOWED,
+      });
     }
 
     const personalizedText = personalizeCampaignText(
@@ -409,6 +443,28 @@ async function updateQueueRecord(queueRecordId: string, status: QueueStatus) {
   await updateMessageQueueRecord(queueRecordId, status);
 }
 
+async function markFirstContactSent(input: {
+  contactId: string;
+  sentAt: Date;
+  campaignId: string;
+  campaignRecipientId: string;
+}) {
+  await prisma.contact.update({
+    where: { id: input.contactId },
+    data: {
+      firstContactSentAt: input.sentAt,
+      firstContactStatus: FIRST_CONTACT_SENT,
+      consentStatus: CONSENT_PENDING,
+      source: MANUAL_CRM_SOURCE,
+    },
+  });
+  console.info("[first-contact:sent]", {
+    campaignId: input.campaignId,
+    campaignRecipientId: input.campaignRecipientId,
+    contactId: input.contactId,
+  });
+}
+
 export async function processCampaignJob(payload: CampaignJobPayload) {
   console.info("[worker:outgoing:received]", {
     queueRecordId: payload.queueRecordId,
@@ -423,7 +479,14 @@ export async function processCampaignJob(payload: CampaignJobPayload) {
 
   const recipient = await prisma.campaignRecipient.findUnique({
     where: { id: payload.campaignRecipientId },
-    include: { campaign: true, contact: true },
+    include: {
+      campaign: {
+        include: {
+          audienceConfig: true,
+        },
+      },
+      contact: true,
+    },
   });
 
   if (!recipient) {
@@ -437,6 +500,19 @@ export async function processCampaignJob(payload: CampaignJobPayload) {
   }
 
   try {
+    const firstContact = evaluateFirstContactEligibility({
+      campaignMode: recipient.campaign.campaignMode,
+      selectedContactIds: recipient.campaign.audienceConfig?.selectedContactIds ?? [],
+      contactId: recipient.contact.id,
+      source: recipient.contact.source,
+      phone: recipient.contact.phone,
+      optIn: recipient.contact.optIn,
+      status: recipient.contact.status,
+      consentStatus: recipient.contact.consentStatus,
+      blockedFromCampaigns: recipient.contact.blockedFromCampaigns,
+      firstContactSentAt: recipient.contact.firstContactSentAt,
+    });
+
     await prisma.campaignRecipient.update({
       where: { id: payload.campaignRecipientId },
       data: {
@@ -463,13 +539,23 @@ export async function processCampaignJob(payload: CampaignJobPayload) {
     }
 
     if (isWhatsAppDryRunEnabled()) {
+      const sentAt = new Date();
       await prisma.campaignRecipient.update({
         where: { id: payload.campaignRecipientId },
         data: {
           status: CampaignRecipientStatus.SENT,
-          sentAt: new Date(),
+          sentAt,
         },
       });
+
+      if (firstContact.allowed) {
+        await markFirstContactSent({
+          contactId: recipient.contact.id,
+          sentAt,
+          campaignId: payload.campaignId,
+          campaignRecipientId: payload.campaignRecipientId,
+        });
+      }
 
       await updateQueueRecord(
         payload.queueRecordId,
@@ -503,6 +589,15 @@ export async function processCampaignJob(payload: CampaignJobPayload) {
         sentAt: delivery.sentAt,
       },
     });
+
+    if (firstContact.allowed) {
+      await markFirstContactSent({
+        contactId: recipient.contact.id,
+        sentAt: delivery.sentAt,
+        campaignId: payload.campaignId,
+        campaignRecipientId: payload.campaignRecipientId,
+      });
+    }
 
     await updateQueueRecord(payload.queueRecordId, QueueStatus.SENT);
   } catch (err) {
@@ -546,6 +641,7 @@ export async function getCampaignAudiencePreview(input: {
   limit?: number;
   sortBy?: "name" | "code" | "importedAt";
   sortOrder?: "asc" | "desc";
+  campaignMode?: string | null;
 }) {
   return resolveCampaignAudience(input);
 }
